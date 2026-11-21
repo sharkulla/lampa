@@ -58,7 +58,7 @@
             emoji: '💩',
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f4a9.png',
             barColor: 'rgba(181, 115, 65, 0.85)',
-            traktScore: 2,
+            traktScore: 1,
             label: 'Слабко',
             order: 4
         }
@@ -378,12 +378,13 @@
     function xhrTraktRequest(method, url, bodyObj, accessToken, traktClientId, onResult) {
         var xhr = new XMLHttpRequest();
         var settled = false;
-        var clientId = traktClientId || getApiKeys().traktClientId;
+        var clientId = trimStr(traktClientId || getStorageStr('trakt_client_id', ''));
+        var token = trimStr(accessToken || '');
 
-        var finish = function(status, parsed) {
+        var finish = function(status, parsed, rawText) {
             if (settled) return;
             settled = true;
-            onResult(status, parsed);
+            onResult(status, parsed, rawText);
         };
 
         xhr.open(method, url, true);
@@ -391,35 +392,36 @@
         xhr.setRequestHeader('Content-Type', 'application/json');
         xhr.setRequestHeader('trakt-api-version', '2');
         xhr.setRequestHeader('trakt-api-key', clientId);
-        if (accessToken) {
-            xhr.setRequestHeader('Authorization', 'Bearer ' + accessToken);
+        if (token) {
+            xhr.setRequestHeader('Authorization', 'Bearer ' + token);
         }
 
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== 4) return;
+            var raw = xhr.responseText || '';
             var parsed = null;
-            if (xhr.responseText) {
+            if (raw) {
                 try {
-                    parsed = JSON.parse(xhr.responseText);
+                    parsed = JSON.parse(raw);
                 } catch (err) {
                     parsed = null;
                 }
             }
-            finish(xhr.status, parsed);
+            finish(xhr.status, parsed, raw);
         };
 
         xhr.ontimeout = function() {
-            finish(0, null);
+            finish(0, null, 'Timeout');
         };
 
         xhr.onerror = function() {
-            finish(xhr.status || 0, null);
+            finish(xhr.status || 0, null, 'Network Error');
         };
 
         try {
             xhr.send(bodyObj ? JSON.stringify(bodyObj) : null);
         } catch (sendErr) {
-            finish(0, null);
+            finish(0, null, sendErr && sendErr.message ? sendErr.message : 'Send Error');
         }
     }
 
@@ -434,7 +436,7 @@
         var expiresAt = Number(getStorageStr(TRAKT_EXPIRES_KEY, '0')) || 0;
         var now = new Date().getTime();
 
-        if (expiresAt > 0 && now < (expiresAt - 60000)) {
+        if (!expiresAt || now < (expiresAt - 60000)) {
             callback(accessToken);
             return;
         }
@@ -456,7 +458,7 @@
                 saveTraktTokens(parsed);
                 logDebug('Токен Trakt успішно оновлено');
                 callback(String(parsed.access_token));
-            } else if (status === 400 || status === 401) {
+            } else if ((status === 400 || status === 401) && now >= expiresAt) {
                 logDebug('Токен оновлення Trakt недійсний, вихід з акаунта');
                 clearTraktTokens();
                 updateAuthButtonText();
@@ -710,51 +712,96 @@
         });
     }
 
+    function hasNotFoundItems(res) {
+        if (!res || !res.not_found) return false;
+        var nfMovies = res.not_found.movies && res.not_found.movies.length > 0;
+        var nfShows = res.not_found.shows && res.not_found.shows.length > 0;
+        return Boolean(nfMovies || nfShows);
+    }
+
     function syncReactionToTrakt(movie, mdbJson, reactionKey) {
-        var keys = getApiKeys();
-        if (!keys.traktClientId) return;
+        var clientId = trimStr(getStorageStr('trakt_client_id', ''));
+        if (!clientId) {
+            if (window.Lampa && Lampa.Noty) {
+                Lampa.Noty.show('Помилка Trakt: відсутній Client ID');
+            }
+            return;
+        }
 
         ensureValidTraktToken(function(token) {
-            if (!token) return;
+            if (!token) {
+                if (window.Lampa && Lampa.Noty) {
+                    Lampa.Noty.show('Помилка Trakt: відсутній токен авторизації');
+                }
+                return;
+            }
 
             var isShow = Boolean(movie.first_air_date);
             var listField = isShow ? 'shows' : 'movies';
-            var idsObj = { tmdb: Number(movie.id) };
-            if (mdbJson && mdbJson.ids && mdbJson.ids.trakt) {
-                idsObj.trakt = Number(mdbJson.ids.trakt);
-            }
             var imdbId = (mdbJson && mdbJson.ids && mdbJson.ids.imdb) || movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
-            if (imdbId) {
-                idsObj.imdb = String(imdbId);
-            }
+            var tmdbNum = parseInt(movie.id, 10);
 
             var payload = {};
             if (reactionKey) {
-                var itemEntry = {
-                    rating: reactionKeyToTraktScore(reactionKey),
-                    ids: idsObj
+                var ratingValue = reactionKeyToTraktScore(reactionKey);
+                var itemObj = {
+                    rating: ratingValue,
+                    ids: {
+                        tmdb: tmdbNum
+                    }
                 };
-                payload[listField] = new Array(itemEntry);
-                xhrTraktRequest('POST', 'https://api.trakt.tv/sync/ratings', payload, token, keys.traktClientId, function(status) {
-                    if (status === 200 || status === 201) {
+                if (imdbId) {
+                    itemObj.ids.imdb = String(imdbId);
+                }
+                payload[listField] = new Array(itemObj);
+
+                logDebug('POST /sync/ratings payload:', JSON.stringify(payload));
+                xhrTraktRequest('POST', 'https://api.trakt.tv/sync/ratings', payload, token, clientId, function(status, res, rawText) {
+                    logDebug('POST /sync/ratings відповідь:', status, rawText);
+                    if ((status === 200 || status === 201) && res && res.added && (res.added.movies > 0 || res.added.shows > 0) && !hasNotFoundItems(res)) {
                         updateLocalTraktSyncMap(isShow, movie, mdbJson, reactionKey);
                         if (window.Lampa && Lampa.Noty) {
-                            Lampa.Noty.show('Оцінку збережено в Trakt');
+                            Lampa.Noty.show('Оцінку збережено в Trakt!');
                         }
-                    } else if (window.Lampa && Lampa.Noty) {
-                        Lampa.Noty.show('Не вдалося зберегти оцінку в Trakt (HTTP ' + status + ')');
+                    } else if (hasNotFoundItems(res)) {
+                        if (window.Lampa && Lampa.Noty) {
+                            Lampa.Noty.show('Помилка Trakt: не знайдено (HTTP ' + status + ')');
+                        }
+                    } else {
+                        var errReason = (res && (res.error_description || res.error || res.message)) ? (' - ' + (res.error_description || res.error || res.message)) : '';
+                        if (window.Lampa && Lampa.Noty) {
+                            Lampa.Noty.show('Помилка Trakt: ' + status + errReason);
+                        }
                     }
                 });
             } else {
-                payload[listField] = new Array({ ids: idsObj });
-                xhrTraktRequest('POST', 'https://api.trakt.tv/sync/ratings/remove', payload, token, keys.traktClientId, function(status) {
-                    if (status === 200 || status === 204) {
+                var removeObj = {
+                    ids: {
+                        tmdb: tmdbNum
+                    }
+                };
+                if (imdbId) {
+                    removeObj.ids.imdb = String(imdbId);
+                }
+                payload[listField] = new Array(removeObj);
+
+                logDebug('POST /sync/ratings/remove payload:', JSON.stringify(payload));
+                xhrTraktRequest('POST', 'https://api.trakt.tv/sync/ratings/remove', payload, token, clientId, function(status, res, rawText) {
+                    logDebug('POST /sync/ratings/remove відповідь:', status, rawText);
+                    var deletedOk = (status === 200 || status === 204) && (!res || !hasNotFoundItems(res));
+                    if (deletedOk && res && res.deleted && (res.deleted.movies === 0 && res.deleted.shows === 0)) {
+                        deletedOk = false;
+                    }
+                    if (deletedOk) {
                         updateLocalTraktSyncMap(isShow, movie, mdbJson, '');
                         if (window.Lampa && Lampa.Noty) {
-                            Lampa.Noty.show('Оцінку видалено з Trakt');
+                            Lampa.Noty.show('Оцінку видалено з Trakt!');
                         }
-                    } else if (window.Lampa && Lampa.Noty) {
-                        Lampa.Noty.show('Не вдалося видалити оцінку з Trakt (HTTP ' + status + ')');
+                    } else {
+                        var errReason = (res && (res.error_description || res.error || res.message)) ? (' - ' + (res.error_description || res.error || res.message)) : '';
+                        if (window.Lampa && Lampa.Noty) {
+                            Lampa.Noty.show('Помилка Trakt: ' + status + errReason);
+                        }
                     }
                 });
             }
@@ -1631,6 +1678,8 @@
                             if (now - lastTapTs < 260) return;
                             lastTapTs = now;
 
+                            logDebug('Натиснуто пігулку:', item.key, 'loggedIn=' + isTraktLoggedIn());
+
                             if (isTraktLoggedIn()) {
                                 var prevTrakt = data.userTraktVote || '';
                                 var nextTrakt = (prevTrakt === item.key) ? '' : item.key;
@@ -2042,7 +2091,7 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.2.2',
+                version: '1.2.3',
                 name: 'Trakt & Рейтинги',
                 description: 'Синхронізація Trakt, живі реакції та рейтинги з 7 платформ',
                 component: PLUGIN_COMPONENT

@@ -2,8 +2,8 @@
     'use strict';
 
     var MDBLIST_API_KEY = '581re7xhn9uqc4v6gjj5p9fz9';
-    var CACHE_PREFIX = 'mdblist_v12_';
-    var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_', 'mdblist_v10_', 'mdblist_v11_');
+    var CACHE_PREFIX = 'mdblist_v11_';
+    var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_', 'mdblist_v10_', 'mdblist_v12_');
     var VOTE_PREFIX = 'mdblist_user_vote_';
     var CACHE_TTL_MINUTES = 1440;
     var STYLE_ID = 'mdblist-reactions-plugin-styles';
@@ -102,7 +102,9 @@
             if (!raw || typeof raw !== 'object') {
                 return null;
             }
-            if (raw._ts && raw.payload && !raw.payload.apiError && !raw.payload.isLoading && raw.payload.ratings && raw.payload.ratings.length > 0) {
+            if (raw._ts && raw.payload && !raw.payload.apiError && !raw.payload.isLoading &&
+                raw.payload.ratings && raw.payload.ratings.length > 0 &&
+                raw.payload.reactions && raw.payload.reactions.isExact === true) {
                 var ageMs = new Date().getTime() - Number(raw._ts);
                 if (ageMs >= 0 && ageMs < CACHE_TTL_MINUTES * 60 * 1000) {
                     return raw.payload;
@@ -119,6 +121,7 @@
     function writeCache(cacheKey, payload) {
         try {
             if (!payload || payload.apiError || payload.isLoading || !payload.ratings || payload.ratings.length === 0) return;
+            if (!payload.reactions || payload.reactions.isExact !== true) return;
             if (!window.Lampa || !Lampa.Storage) return;
             var wrapper = {
                 _ts: new Date().getTime(),
@@ -218,106 +221,53 @@
         return isNaN(val) ? 0 : val;
     }
 
-    function parseMemberHistogramFromHtml(htmlText) {
+    function parseMemberHistogramFromText(rawText) {
         var bars = new Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         var foundCount = 0;
 
-        if (!htmlText || typeof htmlText !== 'string') {
+        if (!rawText || typeof rawText !== 'string') {
             return { bars: bars, total: 0 };
         }
 
-        var attrRegex = /Rating\s*(10|[1-9])\s*:\s*([\d,\.\s\u00a0]+)\s*vote/i;
+        var globalRegex = /Rating\s*(10|[1-9])\s*:\s*([\d,]+)/gi;
+        var match;
+        while ((match = globalRegex.exec(rawText)) !== null) {
+            var idx = parseInt(match[1], 10);
+            var v = parseNumberFromText(match[2]);
+            if (idx >= 1 && idx <= 10 && v > bars[idx]) {
+                bars[idx] = v;
+                foundCount++;
+            }
+        }
 
-        try {
-            if (window.DOMParser) {
-                var parser = new DOMParser();
-                var doc = parser.parseFromString(htmlText, 'text/html');
-                var nodes = doc.querySelectorAll('[title], [data-original-title], [data-bs-original-title], [aria-label]');
-                var i;
-                for (i = 0; i < nodes.length; i++) {
-                    var el = nodes[i];
-                    var txt = el.getAttribute('data-original-title') ||
-                        el.getAttribute('data-bs-original-title') ||
-                        el.getAttribute('title') ||
-                        el.getAttribute('aria-label') || '';
-                    if (!txt) continue;
-                    var m = txt.match(attrRegex);
-                    if (m) {
-                        var ratingIdx = parseInt(m[1], 10);
-                        var voteVal = parseNumberFromText(m[2]);
-                        if (ratingIdx >= 1 && ratingIdx <= 10 && voteVal > bars[ratingIdx]) {
-                            bars[ratingIdx] = voteVal;
-                            foundCount++;
+        if (foundCount === 0) {
+            try {
+                if (window.DOMParser && rawText.indexOf('<') !== -1) {
+                    var parser = new DOMParser();
+                    var doc = parser.parseFromString(rawText, 'text/html');
+                    var nodes = doc.querySelectorAll('[title], [data-original-title], [data-bs-original-title], [aria-label]');
+                    var attrRegex = /Rating\s*(10|[1-9])\s*:\s*([\d,]+)/i;
+                    var i;
+                    for (i = 0; i < nodes.length; i++) {
+                        var el = nodes[i];
+                        var txt = el.getAttribute('title') ||
+                            el.getAttribute('data-bs-original-title') ||
+                            el.getAttribute('data-original-title') ||
+                            el.getAttribute('aria-label') || '';
+                        if (!txt) continue;
+                        var m = txt.match(attrRegex);
+                        if (m) {
+                            var ratingIdx = parseInt(m[1], 10);
+                            var voteVal = parseNumberFromText(m[2]);
+                            if (ratingIdx >= 1 && ratingIdx <= 10 && voteVal > bars[ratingIdx]) {
+                                bars[ratingIdx] = voteVal;
+                                foundCount++;
+                            }
                         }
                     }
                 }
-            }
-        } catch (err) {
-            /* fallback to raw HTML regex */
-        }
-
-        if (foundCount === 0) {
-            var globalRegex = /Rating\s*(10|[1-9])\s*:\s*([\d,\.\s\u00a0]+)\s*vote/gi;
-            var match;
-            while ((match = globalRegex.exec(htmlText)) !== null) {
-                var idx = parseInt(match[1], 10);
-                var v = parseNumberFromText(match[2]);
-                if (idx >= 1 && idx <= 10 && v > bars[idx]) {
-                    bars[idx] = v;
-                    foundCount++;
-                }
-            }
-        }
-
-        if (foundCount === 0) {
-            var jsonPairRegex1 = /"rating"\s*:\s*(10|[1-9])\s*,\s*"votes"\s*:\s*(\d+)/gi;
-            var pMatch1;
-            while ((pMatch1 = jsonPairRegex1.exec(htmlText)) !== null) {
-                var rIdx1 = parseInt(pMatch1[1], 10);
-                var rVal1 = parseInt(pMatch1[2], 10) || 0;
-                if (rIdx1 >= 1 && rIdx1 <= 10 && rVal1 > bars[rIdx1]) {
-                    bars[rIdx1] = rVal1;
-                    foundCount++;
-                }
-            }
-        }
-
-        if (foundCount === 0) {
-            var jsonPairRegex2 = /"votes"\s*:\s*(\d+)\s*,\s*"rating"\s*:\s*(10|[1-9])/gi;
-            var pMatch2;
-            while ((pMatch2 = jsonPairRegex2.exec(htmlText)) !== null) {
-                var rVal2 = parseInt(pMatch2[1], 10) || 0;
-                var rIdx2 = parseInt(pMatch2[2], 10);
-                if (rIdx2 >= 1 && rIdx2 <= 10 && rVal2 > bars[rIdx2]) {
-                    bars[rIdx2] = rVal2;
-                    foundCount++;
-                }
-            }
-        }
-
-        if (foundCount === 0) {
-            var scriptArrayRegex = /(?:ratings?|votes|members|distribution|histogram|data)\s*[:=]\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/gi;
-            var arrMatch;
-            while ((arrMatch = scriptArrayRegex.exec(htmlText)) !== null) {
-                var isAxisLabels = (
-                    arrMatch[1] === '1' && arrMatch[2] === '2' && arrMatch[3] === '3' &&
-                    arrMatch[4] === '4' && arrMatch[5] === '5' && arrMatch[6] === '6' &&
-                    arrMatch[7] === '7' && arrMatch[8] === '8' && arrMatch[9] === '9' &&
-                    arrMatch[10] === '10'
-                );
-                if (isAxisLabels) continue;
-
-                var sIdx;
-                var arrSum = 0;
-                for (sIdx = 1; sIdx <= 10; sIdx++) {
-                    var parsedVal = parseInt(arrMatch[sIdx], 10) || 0;
-                    bars[sIdx] = parsedVal;
-                    arrSum += parsedVal;
-                }
-                if (arrSum > 0) {
-                    foundCount = 10;
-                    break;
-                }
+            } catch (err) {
+                /* ignore DOMParser errors */
             }
         }
 
@@ -337,128 +287,103 @@
             once: (bars[5] || 0) + (bars[6] || 0),
             boring: (bars[3] || 0) + (bars[4] || 0),
             weak: (bars[1] || 0) + (bars[2] || 0),
-            isExact: Boolean(isExact)
+            isExact: Boolean(isExact),
+            isPending: false
         };
     }
 
-    function computeScoreFallbackReactions(json) {
-        var score100 = Number(json && json.score) || 0;
-        if (score100 <= 0) {
-            return {
-                masterpiece: 0,
-                worth: 0,
-                once: 0,
-                boring: 0,
-                weak: 0,
-                isExact: false
-            };
-        }
-
-        var mean = score100 / 10;
-        if (mean < 1) mean = 1;
-        if (mean > 10) mean = 10;
-
-        var memberBase = 250;
-        var sigma = 1.65;
-        var dist = new Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-        var distSum = 0;
-        var k;
-
-        for (k = 1; k <= 10; k++) {
-            var g = Math.exp(-Math.pow(k - mean, 2) / (2 * sigma * sigma));
-            var combined = g + 0.012;
-            dist[k] = combined;
-            distSum += combined;
-        }
-
-        var bars = new Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-        for (k = 1; k <= 10; k++) {
-            bars[k] = Math.round((dist[k] / distSum) * memberBase);
-        }
-
-        return barsToReactions(bars, false);
+    function createEmptyReactions(isPending) {
+        return {
+            masterpiece: 0,
+            worth: 0,
+            once: 0,
+            boring: 0,
+            weak: 0,
+            isExact: false,
+            isPending: Boolean(isPending)
+        };
     }
 
-    function buildCandidatePageUrls(json, movie) {
-        var pathType = movie.first_air_date ? 'show/' : 'movie/';
-        var urls = new Array();
-        var seen = {};
-
-        var addCandidate = function(u) {
-            if (!u || seen[u]) return;
-            seen[u] = true;
-            urls.push(u);
-        };
-
+    function buildSlugFromJson(json, movie) {
         if (json && json.title) {
             var rawBase = String(json.title) + (json.year ? ('-' + json.year) : '');
-            var titleSlug = rawBase.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-            if (titleSlug) {
-                addCandidate('https://mdblist.com/' + pathType + titleSlug);
-            }
+            var slug = rawBase.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+            if (slug) return slug;
         }
-
         if (json && json.ids && json.ids.slug) {
-            addCandidate('https://mdblist.com/' + pathType + json.ids.slug);
+            return String(json.ids.slug);
         }
-
         if (json && json.url) {
-            var jUrl = String(json.url);
-            if (jUrl.indexOf('http') !== 0) {
-                jUrl = 'https://mdblist.com' + (jUrl.indexOf('/') === 0 ? '' : '/') + jUrl;
-            }
-            addCandidate(jUrl);
+            var parts = String(json.url).replace(/\/+$/, '').split('/');
+            var last = parts[parts.length - 1];
+            if (last) return last;
         }
-
-        if (json && json.ratings && json.ratings.length > 0) {
-            var i;
-            for (i = 0; i < json.ratings.length; i++) {
-                var rUrl = json.ratings[i] && json.ratings[i].url ? String(json.ratings[i].url) : '';
-                if (rUrl.indexOf('mdblist.com/') !== -1) {
-                    addCandidate(rUrl);
-                }
-            }
+        if (movie && (movie.original_title || movie.original_name)) {
+            var origTitle = String(movie.original_title || movie.original_name);
+            var releaseStr = movie.release_date || movie.first_air_date || '';
+            var yr = releaseStr ? releaseStr.substring(0, 4) : '';
+            var rawMovie = origTitle + (yr ? ('-' + yr) : '');
+            var mSlug = rawMovie.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+            if (mSlug) return mSlug;
         }
-
-        if (json && json.ids && json.ids.mdblist) {
-            addCandidate('https://mdblist.com/' + pathType + json.ids.mdblist);
-        }
-
-        return urls;
+        return '';
     }
 
-    function fetchHtmlStringWithFallback(pageUrl) {
+    function fetchMemberReactionsFromPage(json, movie) {
+        var typePath = movie.first_air_date ? 'show' : 'movie';
+        var slug = buildSlugFromJson(json, movie);
+
+        if (!slug) {
+            logHtml('Не вдалося сформувати slug сторінки MDBList');
+            return Promise.resolve(createEmptyReactions(false));
+        }
+
+        var pageUrl = 'https://mdblist.com/' + typePath + '/' + slug;
+        var jinaUrl = 'https://r.jina.ai/http://mdblist.com/' + typePath + '/' + slug;
+        var allOriginsUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(pageUrl);
+
         var attempts = new Array(
-            { name: 'Direct', url: pageUrl },
-            { name: 'corsproxy.io', url: 'https://corsproxy.io/?' + encodeURIComponent(pageUrl) },
-            { name: 'allorigins', url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(pageUrl) }
+            { name: 'Jina Reader', url: jinaUrl },
+            { name: 'AllOrigins', url: allOriginsUrl },
+            { name: 'Direct', url: pageUrl }
         );
 
         function tryAttempt(idx) {
             if (idx >= attempts.length) {
-                return Promise.reject(new Error('Усі спроби завантаження HTML невдалі для ' + pageUrl));
+                logHtml('Усі 3 спроби отримання голосів MDBList не дали результату для:', pageUrl);
+                return Promise.resolve(createEmptyReactions(false));
             }
+
             var attempt = attempts[idx];
-            logHtml('Запит (' + attempt.name + '):', attempt.url);
+            logHtml('Спроба #' + (idx + 1) + ' (' + attempt.name + '):', attempt.url);
 
             return fetch(attempt.url).then(function(response) {
-                logHtml('Відповідь (' + attempt.name + '): status=' + response.status);
+                logHtml('Статус (' + attempt.name + '):', response.status);
                 if (!response.ok) {
                     throw new Error('HTTP ' + response.status);
                 }
                 return response.text();
-            }).then(function(htmlText) {
-                var len = htmlText ? htmlText.length : 0;
-                var ratingIdx = htmlText ? htmlText.indexOf('Rating ') : -1;
-                var snippet = ratingIdx !== -1
-                    ? htmlText.substring(Math.max(0, ratingIdx - 80), Math.min(len, ratingIdx + 260))
-                    : (htmlText ? htmlText.substring(0, 320) : '');
-                logHtml('Отримано HTML (' + attempt.name + '), довжина=' + len + ', фрагмент:', snippet);
+            }).then(function(text) {
+                var len = text ? text.length : 0;
+                var hasRatingMarker = text && (text.indexOf('Rating 10:') !== -1 || text.indexOf('Rating 1:') !== -1 || /Rating\s*\d+\s*:/i.test(text));
+                var rIdx = text ? text.search(/Rating\s*(10|[1-9])\s*:/i) : -1;
+                var snippet = rIdx !== -1
+                    ? text.substring(Math.max(0, rIdx - 60), Math.min(len, rIdx + 260))
+                    : (text ? text.substring(0, 250) : '');
 
-                if (!htmlText || len < 200 || (htmlText.indexOf('Just a moment') !== -1 && htmlText.indexOf('cf-browser-verification') !== -1)) {
-                    throw new Error('Cloudflare або порожня сторінка');
+                logHtml('Відповідь (' + attempt.name + '), len=' + len + ', marker=' + hasRatingMarker + ', фрагмент:', snippet);
+
+                if (!hasRatingMarker) {
+                    throw new Error('У тексті не знайдено Rating 1..10');
                 }
-                return htmlText;
+
+                var parsed = parseMemberHistogramFromText(text);
+                logHtml('Розібрано голоси (' + attempt.name + '): total=' + parsed.total + ', bars=' + parsed.bars.slice(1).join(','));
+
+                if (parsed.total > 0) {
+                    return barsToReactions(parsed.bars, true);
+                }
+                throw new Error('Сума голосів дорівнює 0');
             }).catch(function(err) {
                 logHtml('Помилка (' + attempt.name + '):', err && err.message ? err.message : err);
                 return tryAttempt(idx + 1);
@@ -466,36 +391,6 @@
         }
 
         return tryAttempt(0);
-    }
-
-    function fetchMemberReactionsFromPage(json, movie) {
-        var candidateUrls = buildCandidatePageUrls(json, movie);
-        logHtml('Кандидати URL сторінки MDBList:', candidateUrls.join(' , '));
-
-        if (candidateUrls.length === 0) {
-            return Promise.resolve(computeScoreFallbackReactions(json));
-        }
-
-        function tryUrlIndex(idx) {
-            if (idx >= candidateUrls.length) {
-                logHtml('Жоден URL не містить голосів учасників, використовується fallback за json.score');
-                return Promise.resolve(computeScoreFallbackReactions(json));
-            }
-
-            var pageUrl = candidateUrls[idx];
-            return fetchHtmlStringWithFallback(pageUrl).then(function(htmlText) {
-                var parsed = parseMemberHistogramFromHtml(htmlText);
-                logHtml('Результат парсингу для ' + pageUrl + ': total=' + parsed.total + ', bars=' + parsed.bars.slice(1).join(','));
-                if (parsed.total > 0) {
-                    return barsToReactions(parsed.bars, true);
-                }
-                return tryUrlIndex(idx + 1);
-            }).catch(function() {
-                return tryUrlIndex(idx + 1);
-            });
-        }
-
-        return tryUrlIndex(0);
     }
 
     function hasValidPositiveRatings(ratings) {
@@ -1055,9 +950,16 @@
 
                 var currentVote = getUserVote(mediaVoteKey);
                 var sortedPills = buildSortedPillsList(data.reactions, currentVote);
-                var diagSuffix = data.reactions.isExact ? ' (MDBList: exact)' : ' (Fallback: estimated)';
-                var i;
+                var diagSuffix = '';
+                if (data.reactions.isExact) {
+                    diagSuffix = ' (MDBList: exact)';
+                } else if (data.reactions.isPending) {
+                    diagSuffix = ' (Завантаження...)';
+                } else {
+                    diagSuffix = ' (Не вдалося завантажити голоси MDBList)';
+                }
 
+                var i;
                 for (i = 0; i < sortedPills.length; i++) {
                     (function(item, pillIndex) {
                         var pill = document.createElement('div');
@@ -1397,7 +1299,7 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.0.6',
+                version: '1.0.7',
                 name: 'MDBList Реакції та Рейтинги',
                 description: 'Точні реакції учасників MDBList (1–10) та панель рейтингів з 8 платформ',
                 component: PLUGIN_COMPONENT
@@ -1425,7 +1327,7 @@
                 logDebug('Перевірка DOM через 150мс, rootEl знайдено:', Boolean(rootEl));
 
                 if (cachedData) {
-                    logDebug('Миттєвий рендер з кешу v12:', cacheKey);
+                    logDebug('Миттєвий рендер з кешу v11:', cacheKey);
                     if (rootEl) renderIntoCard(rootEl, movie, cachedData);
                     return;
                 }
@@ -1456,7 +1358,7 @@
 
                     var immediatePayload = {
                         ratings: json.ratings,
-                        reactions: computeScoreFallbackReactions(json),
+                        reactions: createEmptyReactions(true),
                         apiError: '',
                         isLoading: false
                     };
@@ -1469,7 +1371,9 @@
                             apiError: '',
                             isLoading: false
                         };
-                        writeCache(cacheKey, finalPayload);
+                        if (memberReactions && memberReactions.isExact === true) {
+                            writeCache(cacheKey, finalPayload);
+                        }
                         var targetRoot = resolveRenderRoot(e) || freshRoot;
                         if (targetRoot) {
                             renderIntoCard(targetRoot, movie, finalPayload);

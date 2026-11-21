@@ -9,12 +9,30 @@
     var TRAKT_EXPIRES_KEY = 'trakt_token_expires';
     var TRAKT_SYNC_CACHE_MOVIES = 'trakt_sync_ratings_movies_v1';
     var TRAKT_SYNC_CACHE_SHOWS = 'trakt_sync_ratings_shows_v1';
+    var TRAKT_WATCHED_CACHE_MOVIES = 'trakt_watched_movies_v1';
+    var TRAKT_WATCHED_CACHE_SHOWS = 'trakt_watched_shows_v1';
     var TRAKT_SYNC_TTL_MS = 15 * 60 * 1000;
     var CACHE_TTL_MINUTES = 1440;
     var STYLE_ID = 'mdblist-reactions-plugin-styles';
     var PLUGIN_COMPONENT = 'mdblist_reactions';
     var initialized = false;
     var activePollTimer = null;
+
+    var scrobbleSession = {
+        active: false,
+        movie: null,
+        isShow: false,
+        season: 0,
+        episode: 0,
+        imdbId: '',
+        tmdbId: 0,
+        progress: 0,
+        startedSent: false,
+        completedSent: false,
+        paused: false,
+        lastPauseProgress: -1,
+        lastTickTs: 0
+    };
 
     var REACTION_DEFS = new Array(
         {
@@ -23,7 +41,7 @@
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f525.png',
             barColor: 'rgba(255, 94, 20, 0.85)',
             traktScore: 10,
-            label: 'Шедевр',
+            label: 'Шедевр (5★ Trakt)',
             order: 0
         },
         {
@@ -32,7 +50,7 @@
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f44d.png',
             barColor: 'rgba(255, 204, 0, 0.85)',
             traktScore: 8,
-            label: 'Варто глянути',
+            label: 'Варто глянути (4★ Trakt)',
             order: 1
         },
         {
@@ -41,7 +59,7 @@
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f914.png',
             barColor: 'rgba(255, 193, 7, 0.78)',
             traktScore: 6,
-            label: 'На один раз',
+            label: 'На один раз (3★ Trakt)',
             order: 2
         },
         {
@@ -50,7 +68,7 @@
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f634.png',
             barColor: 'rgba(100, 149, 237, 0.85)',
             traktScore: 4,
-            label: 'Нудно',
+            label: 'Нудно (2★ Trakt)',
             order: 3
         },
         {
@@ -59,7 +77,7 @@
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f4a9.png',
             barColor: 'rgba(181, 115, 65, 0.85)',
             traktScore: 2,
-            label: 'Слабко',
+            label: 'Слабко (1★ Trakt)',
             order: 4
         }
     );
@@ -117,6 +135,8 @@
             pillStyle: getStorageStr('mdb_pill_style', 'glass'),
             badgeStyle: getStorageStr('mdb_badge_style', 'original'),
             scale: getStorageStr('mdb_scale', '1.0'),
+            autoScrobble: getStorageBoolTrueDefault('trakt_auto_scrobble'),
+            showWatchedBadge: getStorageBoolTrueDefault('trakt_show_watched'),
             usePngEmojis: getStorageBoolTrueDefault('mdb_use_png_emojis'),
             emojiGlow: getStorageBoolTrueDefault('mdb_emoji_glow'),
             emojiAnim: getStorageBoolTrueDefault('mdb_emoji_anim'),
@@ -207,6 +227,16 @@
         }
     }
 
+    function clearTraktWatchedCache() {
+        if (!window.Lampa || !Lampa.Storage) return;
+        try {
+            Lampa.Storage.remove(TRAKT_WATCHED_CACHE_MOVIES);
+            Lampa.Storage.remove(TRAKT_WATCHED_CACHE_SHOWS);
+        } catch (err) {
+            /* ignore */
+        }
+    }
+
     function clearPluginCache(silent) {
         var removed = 0;
         try {
@@ -231,6 +261,7 @@
             /* ignore */
         }
         clearTraktSyncCache();
+        clearTraktWatchedCache();
         logDebug('Кеш очищено, видалено записів:', removed);
         if (!silent && window.Lampa && Lampa.Noty) {
             Lampa.Noty.show('Кеш рейтингів очищено');
@@ -248,6 +279,7 @@
         Lampa.Storage.remove(TRAKT_REFRESH_KEY);
         Lampa.Storage.remove(TRAKT_EXPIRES_KEY);
         clearTraktSyncCache();
+        clearTraktWatchedCache();
     }
 
     function saveTraktTokens(tokenData) {
@@ -563,6 +595,7 @@
                     if (tokStatus === 200 && tokData && tokData.access_token) {
                         saveTraktTokens(tokData);
                         clearTraktSyncCache();
+                        clearTraktWatchedCache();
                         updateAuthButtonText();
                         closeAuthModal();
                         if (window.Lampa && Lampa.Noty) {
@@ -602,11 +635,10 @@
         });
     }
 
-    function readTraktSyncMap(isShow) {
-        var key = isShow ? TRAKT_SYNC_CACHE_SHOWS : TRAKT_SYNC_CACHE_MOVIES;
+    function readTraktTimedMap(storageKey) {
         try {
             if (!window.Lampa || !Lampa.Storage) return null;
-            var raw = Lampa.Storage.get(key, null);
+            var raw = Lampa.Storage.get(storageKey, null);
             if (!raw || !raw._ts || !raw.map) return null;
             if ((new Date().getTime() - Number(raw._ts)) < TRAKT_SYNC_TTL_MS) {
                 return raw.map;
@@ -617,11 +649,10 @@
         }
     }
 
-    function writeTraktSyncMap(isShow, map) {
-        var key = isShow ? TRAKT_SYNC_CACHE_SHOWS : TRAKT_SYNC_CACHE_MOVIES;
+    function writeTraktTimedMap(storageKey, map) {
         try {
             if (!window.Lampa || !Lampa.Storage) return;
-            Lampa.Storage.set(key, {
+            Lampa.Storage.set(storageKey, {
                 _ts: new Date().getTime(),
                 map: map
             });
@@ -631,7 +662,8 @@
     }
 
     function updateLocalTraktSyncMap(isShow, movie, mdbJson, reactionKey) {
-        var map = readTraktSyncMap(isShow);
+        var key = isShow ? TRAKT_SYNC_CACHE_SHOWS : TRAKT_SYNC_CACHE_MOVIES;
+        var map = readTraktTimedMap(key);
         if (!map) map = {};
 
         var score = reactionKey ? reactionKeyToTraktScore(reactionKey) : 0;
@@ -649,17 +681,17 @@
             if (traktId) delete map['trakt_' + traktId];
         }
 
-        writeTraktSyncMap(isShow, map);
+        writeTraktTimedMap(key, map);
     }
 
-    function lookupUserRatingInMap(map, movie, mdbJson) {
-        if (!map) return 0;
-        if (map['tmdb_' + movie.id]) return Number(map['tmdb_' + movie.id]);
+    function lookupInIdMap(map, movie, mdbJson) {
+        if (!map) return null;
+        if (map['tmdb_' + movie.id] !== undefined) return map['tmdb_' + movie.id];
         var traktId = (mdbJson && mdbJson.ids && mdbJson.ids.trakt) ? String(mdbJson.ids.trakt) : '';
-        if (traktId && map['trakt_' + traktId]) return Number(map['trakt_' + traktId]);
+        if (traktId && map['trakt_' + traktId] !== undefined) return map['trakt_' + traktId];
         var imdbId = (mdbJson && mdbJson.ids && mdbJson.ids.imdb) || movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
-        if (imdbId && map['imdb_' + imdbId]) return Number(map['imdb_' + imdbId]);
-        return 0;
+        if (imdbId && map['imdb_' + imdbId] !== undefined) return map['imdb_' + imdbId];
+        return null;
     }
 
     function fetchUserTraktRatingForMedia(movie, mdbJson, callback) {
@@ -670,9 +702,10 @@
         }
 
         var isShow = Boolean(movie.first_air_date);
-        var cachedMap = readTraktSyncMap(isShow);
+        var cacheKey = isShow ? TRAKT_SYNC_CACHE_SHOWS : TRAKT_SYNC_CACHE_MOVIES;
+        var cachedMap = readTraktTimedMap(cacheKey);
         if (cachedMap) {
-            var cachedScore = lookupUserRatingInMap(cachedMap, movie, mdbJson);
+            var cachedScore = Number(lookupInIdMap(cachedMap, movie, mdbJson)) || 0;
             callback(ratingValueToReactionKey(cachedScore));
             return;
         }
@@ -702,8 +735,8 @@
                             if (ids.trakt) map['trakt_' + ids.trakt] = ratingVal;
                         }
                     }
-                    writeTraktSyncMap(isShow, map);
-                    var foundScore = lookupUserRatingInMap(map, movie, mdbJson);
+                    writeTraktTimedMap(cacheKey, map);
+                    var foundScore = Number(lookupInIdMap(map, movie, mdbJson)) || 0;
                     callback(ratingValueToReactionKey(foundScore));
                 } else {
                     callback('');
@@ -712,11 +745,214 @@
         });
     }
 
+    function countTotalShowEpisodes(movie, mdbJson) {
+        if (movie && Number(movie.number_of_episodes) > 0) {
+            return Number(movie.number_of_episodes);
+        }
+        if (movie && movie.seasons && movie.seasons.length > 0) {
+            var sum = 0;
+            var i;
+            for (i = 0; i < movie.seasons.length; i++) {
+                var s = movie.seasons[i];
+                if (s && Number(s.season_number) > 0 && Number(s.episode_count) > 0) {
+                    sum += Number(s.episode_count);
+                }
+            }
+            if (sum > 0) return sum;
+        }
+        if (mdbJson && Number(mdbJson.episodes) > 0) {
+            return Number(mdbJson.episodes);
+        }
+        return 0;
+    }
+
+    function countWatchedEpisodesInTraktEntry(entry) {
+        if (!entry || !entry.seasons || !entry.seasons.length) return 0;
+        var countRegular = 0;
+        var countAll = 0;
+        var i;
+        for (i = 0; i < entry.seasons.length; i++) {
+            var season = entry.seasons[i];
+            if (!season || !season.episodes || !season.episodes.length) continue;
+            countAll += season.episodes.length;
+            if (Number(season.number) > 0) {
+                countRegular += season.episodes.length;
+            }
+        }
+        return countRegular > 0 ? countRegular : countAll;
+    }
+
+    function buildWatchedStatusObj(rawVal, movie, mdbJson) {
+        var isShow = Boolean(movie.first_air_date);
+        if (!isShow) {
+            return {
+                isShow: false,
+                watched: Boolean(rawVal),
+                watchedEpisodes: 0,
+                totalEpisodes: 0
+            };
+        }
+        var watchedEps = Number(rawVal) || 0;
+        var totalEps = countTotalShowEpisodes(movie, mdbJson);
+        return {
+            isShow: true,
+            watched: watchedEps > 0 && (totalEps <= 0 || watchedEps >= totalEps),
+            watchedEpisodes: watchedEps,
+            totalEpisodes: totalEps
+        };
+    }
+
+    function fetchUserWatchedStatusForMedia(movie, mdbJson, callback) {
+        var keys = getApiKeys();
+        if (!isTraktLoggedIn() || !keys.traktClientId) {
+            callback(null);
+            return;
+        }
+
+        var isShow = Boolean(movie.first_air_date);
+        var cacheKey = isShow ? TRAKT_WATCHED_CACHE_SHOWS : TRAKT_WATCHED_CACHE_MOVIES;
+        var cachedMap = readTraktTimedMap(cacheKey);
+        if (cachedMap) {
+            var cachedVal = lookupInIdMap(cachedMap, movie, mdbJson);
+            callback(buildWatchedStatusObj(cachedVal, movie, mdbJson));
+            return;
+        }
+
+        ensureValidTraktToken(function(token) {
+            if (!token) {
+                callback(null);
+                return;
+            }
+            var mediaEndpoint = isShow ? 'shows' : 'movies';
+            var itemKey = isShow ? 'show' : 'movie';
+            var watchedUrl = 'https://api.trakt.tv/sync/watched/' + mediaEndpoint;
+
+            logDebug('Запит історії переглядів Trakt:', watchedUrl);
+            xhrTraktRequest('GET', watchedUrl, null, token, keys.traktClientId, function(status, list) {
+                if (status === 200 && list && typeof list.length === 'number') {
+                    var map = {};
+                    var i;
+                    for (i = 0; i < list.length; i++) {
+                        var entry = list[i];
+                        var obj = entry ? entry[itemKey] : null;
+                        var ids = obj ? obj.ids : null;
+                        var val = isShow ? countWatchedEpisodesInTraktEntry(entry) : 1;
+                        if (ids && val > 0) {
+                            if (ids.tmdb) map['tmdb_' + ids.tmdb] = val;
+                            if (ids.imdb) map['imdb_' + ids.imdb] = val;
+                            if (ids.trakt) map['trakt_' + ids.trakt] = val;
+                        }
+                    }
+                    writeTraktTimedMap(cacheKey, map);
+                    var foundVal = lookupInIdMap(map, movie, mdbJson);
+                    callback(buildWatchedStatusObj(foundVal, movie, mdbJson));
+                } else {
+                    callback(null);
+                }
+            });
+        });
+    }
+
+    function updateLocalWatchedMap(isShow, movie, mdbJson, watchedVal) {
+        var cacheKey = isShow ? TRAKT_WATCHED_CACHE_SHOWS : TRAKT_WATCHED_CACHE_MOVIES;
+        var map = readTraktTimedMap(cacheKey);
+        if (!map) map = {};
+
+        var tmdbKey = 'tmdb_' + movie.id;
+        var imdbId = (mdbJson && mdbJson.ids && mdbJson.ids.imdb) || movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
+        var traktId = (mdbJson && mdbJson.ids && mdbJson.ids.trakt) ? String(mdbJson.ids.trakt) : '';
+
+        if (watchedVal > 0) {
+            map[tmdbKey] = watchedVal;
+            if (imdbId) map['imdb_' + imdbId] = watchedVal;
+            if (traktId) map['trakt_' + traktId] = watchedVal;
+        } else {
+            delete map[tmdbKey];
+            if (imdbId) delete map['imdb_' + imdbId];
+            if (traktId) delete map['trakt_' + traktId];
+        }
+
+        writeTraktTimedMap(cacheKey, map);
+    }
+
+    function toggleWatchedOnTrakt(movie, mdbJson, markAsWatched, onDone) {
+        var clientId = trimStr(getStorageStr('trakt_client_id', ''));
+        if (!clientId) {
+            if (window.Lampa && Lampa.Noty) {
+                Lampa.Noty.show('Помилка Trakt: відсутній Client ID');
+            }
+            return;
+        }
+
+        ensureValidTraktToken(function(token) {
+            if (!token) {
+                if (window.Lampa && Lampa.Noty) {
+                    Lampa.Noty.show('Помилка Trakt: відсутній токен авторизації');
+                }
+                return;
+            }
+
+            var isShow = Boolean(movie.first_air_date);
+            var listField = isShow ? 'shows' : 'movies';
+            var imdbId = (mdbJson && mdbJson.ids && mdbJson.ids.imdb) || movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
+            var tmdbNum = parseInt(movie.id, 10);
+
+            var itemObj = {
+                ids: {
+                    tmdb: tmdbNum
+                }
+            };
+            if (imdbId) {
+                itemObj.ids.imdb = String(imdbId);
+            }
+
+            var payload = {};
+            payload[listField] = new Array(itemObj);
+
+            var endpoint = markAsWatched
+                ? 'https://api.trakt.tv/sync/history'
+                : 'https://api.trakt.tv/sync/history/remove';
+
+            logDebug('POST ' + endpoint + ' payload:', JSON.stringify(payload));
+            xhrTraktRequest('POST', endpoint, payload, token, clientId, function(status, res, rawText) {
+                logDebug('POST ' + endpoint + ' відповідь:', status, rawText);
+                var ok = (status === 200 || status === 201 || status === 204) && !hasNotFoundItems(res);
+
+                if (markAsWatched) {
+                    if (ok && res && res.added && (res.added.movies > 0 || res.added.shows > 0 || res.added.episodes > 0)) {
+                        var newVal = isShow ? Math.max(1, countTotalShowEpisodes(movie, mdbJson)) : 1;
+                        updateLocalWatchedMap(isShow, movie, mdbJson, newVal);
+                        if (window.Lampa && Lampa.Noty) {
+                            Lampa.Noty.show('Позначено як переглянуто в Trakt!');
+                        }
+                        if (typeof onDone === 'function') onDone(true, newVal);
+                        return;
+                    }
+                } else {
+                    if (ok) {
+                        updateLocalWatchedMap(isShow, movie, mdbJson, 0);
+                        if (window.Lampa && Lampa.Noty) {
+                            Lampa.Noty.show('Видалено з переглянутих у Trakt');
+                        }
+                        if (typeof onDone === 'function') onDone(true, 0);
+                        return;
+                    }
+                }
+
+                if (window.Lampa && Lampa.Noty) {
+                    Lampa.Noty.show('Помилка Trakt: HTTP ' + status);
+                }
+                if (typeof onDone === 'function') onDone(false, null);
+            });
+        });
+    }
+
     function hasNotFoundItems(res) {
         if (!res || !res.not_found) return false;
         var nfMovies = res.not_found.movies && res.not_found.movies.length > 0;
         var nfShows = res.not_found.shows && res.not_found.shows.length > 0;
-        return Boolean(nfMovies || nfShows);
+        var nfEpisodes = res.not_found.episodes && res.not_found.episodes.length > 0;
+        return Boolean(nfMovies || nfShows || nfEpisodes);
     }
 
     function syncReactionToTrakt(movie, mdbJson, reactionKey) {
@@ -806,6 +1042,274 @@
                 });
             }
         });
+    }
+
+    function buildScrobblePayload(session, progressVal) {
+        var idsObj = {
+            tmdb: session.tmdbId
+        };
+        if (session.imdbId) {
+            idsObj.imdb = session.imdbId;
+        }
+
+        var clampedProgress = Math.min(100, Math.max(0, Math.round(Number(progressVal) || 0)));
+
+        if (session.isShow) {
+            return {
+                show: { ids: idsObj },
+                episode: {
+                    season: session.season,
+                    number: session.episode
+                },
+                progress: clampedProgress
+            };
+        }
+
+        return {
+            movie: { ids: idsObj },
+            progress: clampedProgress
+        };
+    }
+
+    function sendTraktScrobble(action, session, progressVal, onSuccess) {
+        var settings = getSettings();
+        if (!settings.autoScrobble || !isTraktLoggedIn()) return;
+        var clientId = trimStr(getStorageStr('trakt_client_id', ''));
+        if (!clientId || !session || !session.tmdbId) return;
+        if (session.isShow && session.episode <= 0) return;
+
+        var payload = buildScrobblePayload(session, progressVal);
+        var url = 'https://api.trakt.tv/scrobble/' + action;
+
+        ensureValidTraktToken(function(token) {
+            if (!token) return;
+            logDebug('Trakt scrobble/' + action + ':', JSON.stringify(payload));
+            xhrTraktRequest('POST', url, payload, token, clientId, function(status, res, rawText) {
+                logDebug('Trakt scrobble/' + action + ' відповідь:', status, rawText);
+                if ((status === 200 || status === 201) && typeof onSuccess === 'function') {
+                    onSuccess(res);
+                }
+            });
+        });
+    }
+
+    function extractPlayerProgress(evData) {
+        if (evData && Number(evData.duration) > 0) {
+            return (Number(evData.current) / Number(evData.duration)) * 100;
+        }
+        try {
+            if (window.Lampa && Lampa.PlayerVideo && typeof Lampa.PlayerVideo.video === 'function') {
+                var v = Lampa.PlayerVideo.video();
+                if (v && Number(v.duration) > 0) {
+                    return (Number(v.currentTime) / Number(v.duration)) * 100;
+                }
+            }
+        } catch (err) {
+            /* ignore */
+        }
+        var domVideo = document.querySelector('video');
+        if (domVideo && Number(domVideo.duration) > 0) {
+            return (Number(domVideo.currentTime) / Number(domVideo.duration)) * 100;
+        }
+        return scrobbleSession.progress || 0;
+    }
+
+    function initScrobbleSessionFromData(data) {
+        var pData = data || (window.Lampa && Lampa.Player && typeof Lampa.Player.playdata === 'function' ? Lampa.Player.playdata() : null) || {};
+        var media = pData.movie || pData.card || null;
+        if (!media && pData.playlist && pData.playlist.length > 0) {
+            media = pData.playlist[0].movie || pData.playlist[0].card || null;
+        }
+        if (!media && window.Lampa && Lampa.Activity && typeof Lampa.Activity.active === 'function') {
+            var activeAct = Lampa.Activity.active();
+            if (activeAct && activeAct.movie) media = activeAct.movie;
+        }
+
+        if (!media || !media.id) {
+            scrobbleSession.active = false;
+            return false;
+        }
+
+        var tmdbId = parseInt(media.id, 10);
+        if (isNaN(tmdbId) || tmdbId <= 0) {
+            scrobbleSession.active = false;
+            return false;
+        }
+
+        var hasSeasonOrEp = (pData.season !== undefined && pData.season !== null) ||
+            (pData.episode !== undefined && pData.episode !== null) ||
+            Boolean(pData.episode_data);
+        var isShow = Boolean(media.first_air_date || hasSeasonOrEp);
+
+        var seasonNum = 0;
+        var episodeNum = 0;
+
+        if (isShow) {
+            if (pData.season !== undefined && pData.season !== null && pData.season !== '') {
+                seasonNum = parseInt(pData.season, 10);
+            } else if (pData.episode_data && pData.episode_data.season_number !== undefined) {
+                seasonNum = parseInt(pData.episode_data.season_number, 10);
+            } else {
+                seasonNum = 1;
+            }
+
+            if (pData.episode !== undefined && pData.episode !== null && pData.episode !== '') {
+                episodeNum = parseInt(pData.episode, 10);
+            } else if (pData.episode_data && pData.episode_data.episode_number !== undefined) {
+                episodeNum = parseInt(pData.episode_data.episode_number, 10);
+            }
+
+            if ((!episodeNum || isNaN(episodeNum)) && pData.title) {
+                var seMatch = String(pData.title).match(/S(\d{1,2})\s*E(\d{1,3})/i) || String(pData.title).match(/(\d{1,2})x(\d{1,3})/i);
+                if (seMatch) {
+                    seasonNum = parseInt(seMatch[1], 10);
+                    episodeNum = parseInt(seMatch[2], 10);
+                }
+            }
+            if (isNaN(seasonNum)) seasonNum = 1;
+            if (isNaN(episodeNum)) episodeNum = 0;
+        }
+
+        var imdbId = media.imdb_id || (media.external_ids && media.external_ids.imdb_id) || '';
+
+        scrobbleSession.active = true;
+        scrobbleSession.movie = media;
+        scrobbleSession.isShow = isShow;
+        scrobbleSession.season = seasonNum;
+        scrobbleSession.episode = episodeNum;
+        scrobbleSession.imdbId = imdbId ? String(imdbId) : '';
+        scrobbleSession.tmdbId = tmdbId;
+        scrobbleSession.progress = 0;
+        scrobbleSession.startedSent = false;
+        scrobbleSession.completedSent = false;
+        scrobbleSession.paused = false;
+        scrobbleSession.lastPauseProgress = -1;
+        scrobbleSession.lastTickTs = 0;
+
+        return true;
+    }
+
+    function completeScrobbleIfNeeded(progressVal) {
+        if (!scrobbleSession.active || scrobbleSession.completedSent) return;
+        scrobbleSession.completedSent = true;
+        var finalProgress = Math.max(80, Math.round(Number(progressVal) || 80));
+
+        sendTraktScrobble('stop', scrobbleSession, finalProgress, function() {
+            clearTraktWatchedCache();
+            if (window.Lampa && Lampa.Noty) {
+                Lampa.Noty.show('Trakt: позначено як переглянуто');
+            }
+        });
+    }
+
+    function attachPlayerScrobbler() {
+        if (!window.Lampa) return;
+
+        var onStart = function(data) {
+            var settings = getSettings();
+            if (!settings.autoScrobble || !isTraktLoggedIn()) return;
+            if (!initScrobbleSessionFromData(data)) return;
+
+            var initialProg = extractPlayerProgress(data);
+            scrobbleSession.progress = initialProg;
+            if (!scrobbleSession.startedSent) {
+                scrobbleSession.startedSent = true;
+                sendTraktScrobble('start', scrobbleSession, initialProg);
+            }
+        };
+
+        var onPlayResume = function() {
+            if (!scrobbleSession.active || scrobbleSession.completedSent) return;
+            if (scrobbleSession.paused) {
+                scrobbleSession.paused = false;
+                var now = new Date().getTime();
+                if (now - scrobbleSession.lastTickTs > 2500) {
+                    scrobbleSession.lastTickTs = now;
+                    sendTraktScrobble('start', scrobbleSession, scrobbleSession.progress);
+                }
+            }
+        };
+
+        var onPause = function(evData) {
+            if (!scrobbleSession.active || scrobbleSession.completedSent) return;
+            scrobbleSession.paused = true;
+            var pct = extractPlayerProgress(evData);
+            scrobbleSession.progress = pct;
+            if (pct < 80 && Math.abs(Math.round(pct) - scrobbleSession.lastPauseProgress) >= 1) {
+                scrobbleSession.lastPauseProgress = Math.round(pct);
+                sendTraktScrobble('pause', scrobbleSession, pct);
+            }
+        };
+
+        var onTimeUpdate = function(evData) {
+            if (!scrobbleSession.active || scrobbleSession.completedSent) return;
+            var now = new Date().getTime();
+            if (now - scrobbleSession.lastTickTs < 2000) return;
+            scrobbleSession.lastTickTs = now;
+
+            var pct = extractPlayerProgress(evData);
+            scrobbleSession.progress = pct;
+
+            if (!scrobbleSession.startedSent && pct > 0 && pct < 80) {
+                scrobbleSession.startedSent = true;
+                sendTraktScrobble('start', scrobbleSession, pct);
+            }
+
+            if (pct >= 80) {
+                completeScrobbleIfNeeded(pct);
+            }
+        };
+
+        var onEnded = function() {
+            if (!scrobbleSession.active) return;
+            completeScrobbleIfNeeded(100);
+        };
+
+        var onDestroy = function() {
+            if (!scrobbleSession.active) return;
+            var pct = extractPlayerProgress(null);
+            if (pct <= 0) pct = scrobbleSession.progress;
+
+            if (!scrobbleSession.completedSent) {
+                if (pct >= 80) {
+                    completeScrobbleIfNeeded(pct);
+                } else if (pct > 0) {
+                    sendTraktScrobble('stop', scrobbleSession, pct);
+                }
+            }
+            scrobbleSession.active = false;
+        };
+
+        if (Lampa.Player && Lampa.Player.listener && typeof Lampa.Player.listener.follow === 'function') {
+            Lampa.Player.listener.follow('start', onStart);
+            Lampa.Player.listener.follow('play', onPlayResume);
+            Lampa.Player.listener.follow('pause', onPause);
+            Lampa.Player.listener.follow('timeupdate', onTimeUpdate);
+            Lampa.Player.listener.follow('ended', onEnded);
+            Lampa.Player.listener.follow('destroy', onDestroy);
+        }
+
+        if (Lampa.PlayerVideo && Lampa.PlayerVideo.listener && typeof Lampa.PlayerVideo.listener.follow === 'function') {
+            Lampa.PlayerVideo.listener.follow('play', onPlayResume);
+            Lampa.PlayerVideo.listener.follow('pause', onPause);
+            Lampa.PlayerVideo.listener.follow('timeupdate', onTimeUpdate);
+            Lampa.PlayerVideo.listener.follow('ended', onEnded);
+            Lampa.PlayerVideo.listener.follow('stop', onDestroy);
+        }
+
+        if (Lampa.Listener && typeof Lampa.Listener.follow === 'function') {
+            Lampa.Listener.follow('player', function(e) {
+                if (!e || !e.type) return;
+                if (e.type === 'start') onStart(e.data || e);
+                if (e.type === 'play') onPlayResume();
+                if (e.type === 'pause') onPause(e.data || e);
+                if (e.type === 'timeupdate') onTimeUpdate(e.data || e);
+                if (e.type === 'ended') onEnded();
+                if (e.type === 'destroy') onDestroy();
+            });
+        }
+
+        logDebug('Слухач скробблінгу плеєра Trakt підключено');
     }
 
     function xhrTraktGet(url, traktClientId, onSuccess, onError) {
@@ -1351,6 +1855,44 @@
             '  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);' +
             '}' +
 
+            '.mdb-watched-badge {' +
+            '  position: relative;' +
+            '  display: inline-flex;' +
+            '  align-items: center;' +
+            '  gap: 0.4em;' +
+            '  padding: 0.42em 0.95em;' +
+            '  border-radius: 999px;' +
+            '  cursor: pointer;' +
+            '  user-select: none;' +
+            '  font-size: 0.95em;' +
+            '  font-weight: 600;' +
+            '  transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;' +
+            '}' +
+            '.mdb-style-compact .mdb-watched-badge {' +
+            '  padding: 0.28em 0.72em;' +
+            '  font-size: 0.86em;' +
+            '}' +
+            '.mdb-watched-badge.is-watched {' +
+            '  background: rgba(46, 204, 113, 0.18);' +
+            '  border: 1px solid rgba(46, 204, 113, 0.48);' +
+            '  color: #69f0ae;' +
+            '}' +
+            '.mdb-watched-badge.is-watched-full {' +
+            '  background: rgba(46, 204, 113, 0.30);' +
+            '  border: 1px solid rgba(46, 204, 113, 0.75);' +
+            '  color: #b9f6ca;' +
+            '}' +
+            '.mdb-watched-badge.is-unwatched {' +
+            '  background: rgba(255, 255, 255, 0.08);' +
+            '  border: 1px solid rgba(255, 255, 255, 0.16);' +
+            '  color: rgba(255, 255, 255, 0.82);' +
+            '}' +
+            '.mdb-watched-badge.focus, .mdb-watched-badge:hover {' +
+            '  transform: scale(1.05);' +
+            '  border-color: #ffffff;' +
+            '  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);' +
+            '}' +
+
             '.mdb-pill-icon {' +
             '  display: inline-flex;' +
             '  align-items: center;' +
@@ -1578,6 +2120,80 @@
         document.head.appendChild(styleEl);
     }
 
+    function createWatchedBadgeElement(data, movie) {
+        var ws = data.watchedStatus;
+        if (!ws) return null;
+
+        var badge = document.createElement('div');
+        var badgeText = '';
+        var badgeClass = 'is-unwatched';
+
+        if (ws.isShow) {
+            if (ws.watchedEpisodes > 0) {
+                if (ws.totalEpisodes > 0) {
+                    badgeText = '✓ Переглянуто ' + ws.watchedEpisodes + ' з ' + ws.totalEpisodes + ' серій';
+                    badgeClass = (ws.watchedEpisodes >= ws.totalEpisodes) ? 'is-watched-full' : 'is-watched';
+                } else {
+                    badgeText = '✓ Переглянуто ' + ws.watchedEpisodes + ' серій';
+                    badgeClass = 'is-watched';
+                }
+            } else {
+                badgeText = '+ Позначити переглянутим';
+                badgeClass = 'is-unwatched';
+            }
+        } else {
+            if (ws.watched) {
+                badgeText = '✓ Переглянуто';
+                badgeClass = 'is-watched';
+            } else {
+                badgeText = '+ Позначити переглянутим';
+                badgeClass = 'is-unwatched';
+            }
+        }
+
+        badge.className = 'mdb-watched-badge selector ' + badgeClass;
+        badge.textContent = badgeText;
+
+        var lastWatchedTapTs = 0;
+        var handleWatchedToggle = function(ev) {
+            if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
+            var now = new Date().getTime();
+            if (now - lastWatchedTapTs < 350) return;
+            lastWatchedTapTs = now;
+
+            var targetMark = ws.isShow ? !(ws.watchedEpisodes > 0) : !ws.watched;
+            toggleWatchedOnTrakt(movie, data.mdbJson || null, targetMark, function(ok, newVal) {
+                if (!ok) return;
+                if (ws.isShow) {
+                    ws.watchedEpisodes = Number(newVal) || 0;
+                    ws.watched = ws.watchedEpisodes > 0 && (ws.totalEpisodes <= 0 || ws.watchedEpisodes >= ws.totalEpisodes);
+                } else {
+                    ws.watched = Boolean(targetMark);
+                }
+                var updatedEl = createWatchedBadgeElement(data, movie);
+                if (updatedEl && badge.parentNode) {
+                    badge.parentNode.replaceChild(updatedEl, badge);
+                    if (window.Lampa && Lampa.Controller && typeof Lampa.Controller.collectionFocus === 'function') {
+                        try {
+                            Lampa.Controller.collectionFocus(updatedEl);
+                        } catch (eFocus) {
+                            /* ignore */
+                        }
+                    }
+                }
+            });
+        };
+
+        badge.addEventListener('click', handleWatchedToggle);
+        if (window.$) {
+            window.$(badge).on('hover:enter', handleWatchedToggle);
+        } else {
+            badge.addEventListener('hover:enter', handleWatchedToggle);
+        }
+
+        return badge;
+    }
+
     function buildWrapperElement(data, movie, settings) {
         var type = movie.first_air_date ? 'show' : 'movie';
         var mediaVoteKey = type + '_' + movie.id;
@@ -1592,127 +2208,141 @@
             (settings.emojiGlow ? ' mdb-emoji-glow' : '') +
             (settings.emojiAnim ? ' mdb-emoji-anim' : '');
 
-        if (settings.showPills && data.reactions) {
+        var showWatched = settings.showWatchedBadge && isTraktLoggedIn() && Boolean(data.watchedStatus);
+
+        if ((settings.showPills && data.reactions) || showWatched) {
             var pillsRow = document.createElement('div');
             pillsRow.className = 'mdb-pills-row lampa-pill-row';
             var lastTapTs = 0;
+
+            var appendWatchedBadgeToRow = function() {
+                if (!showWatched) return;
+                var wBadge = createWatchedBadgeElement(data, movie);
+                if (wBadge) {
+                    pillsRow.appendChild(wBadge);
+                }
+            };
 
             var renderSortedPills = function(focusKey) {
                 while (pillsRow.firstChild) {
                     pillsRow.removeChild(pillsRow.firstChild);
                 }
 
-                var loggedIn = isTraktLoggedIn();
-                var activeVote = loggedIn
-                    ? (data.userTraktVote !== undefined ? data.userTraktVote : '')
-                    : getUserLocalVote(mediaVoteKey);
-                var initialTraktVote = data.initialTraktVote || '';
-                var sortedPills = buildSortedPillsList(data.reactions, activeVote, initialTraktVote, loggedIn);
-                var hintSuffix = data.reactions.hintText ? (' (' + data.reactions.hintText + ')') : '';
-                var totalVotes = 0;
-                var i;
+                if (settings.showPills && data.reactions) {
+                    var loggedIn = isTraktLoggedIn();
+                    var activeVote = loggedIn
+                        ? (data.userTraktVote !== undefined ? data.userTraktVote : '')
+                        : getUserLocalVote(mediaVoteKey);
+                    var initialTraktVote = data.initialTraktVote || '';
+                    var sortedPills = buildSortedPillsList(data.reactions, activeVote, initialTraktVote, loggedIn);
+                    var hintSuffix = data.reactions.hintText ? (' (' + data.reactions.hintText + ')') : '';
+                    var totalVotes = 0;
+                    var i;
 
-                for (i = 0; i < sortedPills.length; i++) {
-                    totalVotes += sortedPills[i].count;
-                }
+                    for (i = 0; i < sortedPills.length; i++) {
+                        totalVotes += sortedPills[i].count;
+                    }
 
-                for (i = 0; i < sortedPills.length; i++) {
-                    (function(item) {
-                        var pill = document.createElement('div');
-                        pill.className = 'mdb-pill lampa-pill-btn selector' + (item.isSelected ? ' active' : '');
-                        pill.setAttribute('data-reaction-key', item.key);
+                    for (i = 0; i < sortedPills.length; i++) {
+                        (function(item) {
+                            var pill = document.createElement('div');
+                            pill.className = 'mdb-pill lampa-pill-btn selector' + (item.isSelected ? ' active' : '');
+                            pill.setAttribute('data-reaction-key', item.key);
 
-                        var tooltip = document.createElement('span');
-                        tooltip.className = 'mdb-pill-tooltip';
-                        tooltip.textContent = item.label + hintSuffix;
+                            var tooltip = document.createElement('span');
+                            tooltip.className = 'mdb-pill-tooltip';
+                            tooltip.textContent = item.label + hintSuffix;
 
-                        var iconWrap = document.createElement('span');
-                        iconWrap.className = 'mdb-pill-icon';
+                            var iconWrap = document.createElement('span');
+                            iconWrap.className = 'mdb-pill-icon';
 
-                        if (settings.usePngEmojis && item.png) {
-                            var imgEl = document.createElement('img');
-                            imgEl.className = 'mdb-pill-emoji-img';
-                            imgEl.src = item.png;
-                            imgEl.alt = item.emoji;
-                            imgEl.onerror = function() {
-                                if (imgEl.parentNode) {
-                                    var fallbackSpan = document.createElement('span');
-                                    fallbackSpan.className = 'mdb-pill-emoji-unicode';
-                                    fallbackSpan.textContent = item.emoji;
-                                    imgEl.parentNode.replaceChild(fallbackSpan, imgEl);
+                            if (settings.usePngEmojis && item.png) {
+                                var imgEl = document.createElement('img');
+                                imgEl.className = 'mdb-pill-emoji-img';
+                                imgEl.src = item.png;
+                                imgEl.alt = item.emoji;
+                                imgEl.onerror = function() {
+                                    if (imgEl.parentNode) {
+                                        var fallbackSpan = document.createElement('span');
+                                        fallbackSpan.className = 'mdb-pill-emoji-unicode';
+                                        fallbackSpan.textContent = item.emoji;
+                                        imgEl.parentNode.replaceChild(fallbackSpan, imgEl);
+                                    }
+                                };
+                                iconWrap.appendChild(imgEl);
+                            } else {
+                                var unicodeSpan = document.createElement('span');
+                                unicodeSpan.className = 'mdb-pill-emoji-unicode';
+                                unicodeSpan.textContent = item.emoji;
+                                iconWrap.appendChild(unicodeSpan);
+                            }
+
+                            var countEl = document.createElement('span');
+                            countEl.className = 'mdb-pill-count';
+                            countEl.textContent = formatPillCount(item.count);
+
+                            pill.appendChild(tooltip);
+                            pill.appendChild(iconWrap);
+                            pill.appendChild(countEl);
+
+                            if (settings.emojiBar) {
+                                var pct = totalVotes > 0 ? Math.round((item.count / totalVotes) * 100) : 0;
+                                var barTrack = document.createElement('span');
+                                barTrack.className = 'mdb-pill-bar-track';
+
+                                var barFill = document.createElement('span');
+                                barFill.className = 'mdb-pill-bar-fill';
+                                barFill.style.width = pct + '%';
+                                barFill.style.backgroundColor = item.barColor;
+
+                                barTrack.appendChild(barFill);
+                                pill.appendChild(barTrack);
+                            }
+
+                            var handleToggle = function(ev) {
+                                if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
+                                var now = new Date().getTime();
+                                if (now - lastTapTs < 260) return;
+                                lastTapTs = now;
+
+                                logDebug('Натиснуто пігулку:', item.key, 'loggedIn=' + isTraktLoggedIn());
+
+                                if (isTraktLoggedIn()) {
+                                    var prevTrakt = data.userTraktVote || '';
+                                    var nextTrakt = (prevTrakt === item.key) ? '' : item.key;
+                                    data.userTraktVote = nextTrakt;
+                                    syncReactionToTrakt(movie, data.mdbJson || null, nextTrakt);
+                                    renderSortedPills(item.key);
+                                } else {
+                                    var prevVote = getUserLocalVote(mediaVoteKey);
+                                    var nextVote = (prevVote === item.key) ? '' : item.key;
+                                    setUserLocalVote(mediaVoteKey, nextVote);
+                                    logDebug('Локальний голос оновлено:', mediaVoteKey, nextVote || 'скасовано');
+                                    renderSortedPills(item.key);
                                 }
                             };
-                            iconWrap.appendChild(imgEl);
-                        } else {
-                            var unicodeSpan = document.createElement('span');
-                            unicodeSpan.className = 'mdb-pill-emoji-unicode';
-                            unicodeSpan.textContent = item.emoji;
-                            iconWrap.appendChild(unicodeSpan);
-                        }
 
-                        var countEl = document.createElement('span');
-                        countEl.className = 'mdb-pill-count';
-                        countEl.textContent = formatPillCount(item.count);
-
-                        pill.appendChild(tooltip);
-                        pill.appendChild(iconWrap);
-                        pill.appendChild(countEl);
-
-                        if (settings.emojiBar) {
-                            var pct = totalVotes > 0 ? Math.round((item.count / totalVotes) * 100) : 0;
-                            var barTrack = document.createElement('span');
-                            barTrack.className = 'mdb-pill-bar-track';
-
-                            var barFill = document.createElement('span');
-                            barFill.className = 'mdb-pill-bar-fill';
-                            barFill.style.width = pct + '%';
-                            barFill.style.backgroundColor = item.barColor;
-
-                            barTrack.appendChild(barFill);
-                            pill.appendChild(barTrack);
-                        }
-
-                        var handleToggle = function(ev) {
-                            if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
-                            var now = new Date().getTime();
-                            if (now - lastTapTs < 260) return;
-                            lastTapTs = now;
-
-                            logDebug('Натиснуто пігулку:', item.key, 'loggedIn=' + isTraktLoggedIn());
-
-                            if (isTraktLoggedIn()) {
-                                var prevTrakt = data.userTraktVote || '';
-                                var nextTrakt = (prevTrakt === item.key) ? '' : item.key;
-                                data.userTraktVote = nextTrakt;
-                                syncReactionToTrakt(movie, data.mdbJson || null, nextTrakt);
-                                renderSortedPills(item.key);
+                            pill.addEventListener('click', handleToggle);
+                            if (window.$) {
+                                window.$(pill).on('hover:enter', handleToggle);
                             } else {
-                                var prevVote = getUserLocalVote(mediaVoteKey);
-                                var nextVote = (prevVote === item.key) ? '' : item.key;
-                                setUserLocalVote(mediaVoteKey, nextVote);
-                                logDebug('Локальний голос оновлено:', mediaVoteKey, nextVote || 'скасовано');
-                                renderSortedPills(item.key);
+                                pill.addEventListener('hover:enter', handleToggle);
                             }
-                        };
 
-                        pill.addEventListener('click', handleToggle);
-                        if (window.$) {
-                            window.$(pill).on('hover:enter', handleToggle);
-                        } else {
-                            pill.addEventListener('hover:enter', handleToggle);
-                        }
+                            pillsRow.appendChild(pill);
 
-                        pillsRow.appendChild(pill);
-
-                        if (focusKey && focusKey === item.key && window.Lampa && Lampa.Controller && typeof Lampa.Controller.collectionFocus === 'function') {
-                            try {
-                                Lampa.Controller.collectionFocus(pill);
-                            } catch (eFocus) {
-                                /* ignore focus error */
+                            if (focusKey && focusKey === item.key && window.Lampa && Lampa.Controller && typeof Lampa.Controller.collectionFocus === 'function') {
+                                try {
+                                    Lampa.Controller.collectionFocus(pill);
+                                } catch (eFocus) {
+                                    /* ignore focus error */
+                                }
                             }
-                        }
-                    })(sortedPills[i]);
+                        })(sortedPills[i]);
+                    }
                 }
+
+                appendWatchedBadgeToRow();
             };
 
             renderSortedPills('');
@@ -1926,7 +2556,7 @@
                 name: isTraktLoggedIn()
                     ? 'Вийти з Trakt (Підключено)'
                     : 'Увійти в акаунт Trakt (Код активації)',
-                description: 'Двостороння синхронізація ваших реакцій із профілем Trakt'
+                description: 'Двостороння синхронізація реакцій, переглядів та скробблінг із профілем Trakt'
             },
             onChange: function() {
                 if (isTraktLoggedIn()) {
@@ -2041,6 +2671,8 @@
         });
 
         var toggles = new Array(
+            { key: 'trakt_auto_scrobble', title: 'Автоматичний скробблінг у плеєрі' },
+            { key: 'trakt_show_watched', title: 'Показувати бейдж «Переглянуто»' },
             { key: 'mdb_use_png_emojis', title: 'Глянцеві 3D-іконки емодзі' },
             { key: 'mdb_emoji_glow', title: 'Кольорове світіння емодзі' },
             { key: 'mdb_emoji_anim', title: 'Анімація емодзі при наведенні' },
@@ -2091,9 +2723,9 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.2.3',
+                version: '1.3.0',
                 name: 'Trakt & Рейтинги',
-                description: 'Синхронізація Trakt, живі реакції та рейтинги з 7 платформ',
+                description: 'Синхронізація Trakt, скробблінг 80%, живі реакції та рейтинги з 7 платформ',
                 component: PLUGIN_COMPONENT
             });
         }
@@ -2114,6 +2746,7 @@
 
             var cachedData = readCache(cacheKey);
             var keys = getApiKeys();
+            var settings = getSettings();
 
             window.setTimeout(function() {
                 var rootEl = resolveRenderRoot(e);
@@ -2132,7 +2765,8 @@
                         apiError: cachedData.apiError || '',
                         ratingsLoading: false,
                         userTraktVote: '',
-                        initialTraktVote: ''
+                        initialTraktVote: '',
+                        watchedStatus: null
                     };
                     if (rootEl) renderIntoCard(rootEl, movie, cachedRenderState);
 
@@ -2143,6 +2777,14 @@
                             var targetRoot = resolveRenderRoot(e) || rootEl;
                             if (targetRoot) renderIntoCard(targetRoot, movie, cachedRenderState);
                         });
+
+                        if (settings.showWatchedBadge) {
+                            fetchUserWatchedStatusForMedia(movie, cachedRenderState.mdbJson, function(watchedStatus) {
+                                cachedRenderState.watchedStatus = watchedStatus;
+                                var targetRoot = resolveRenderRoot(e) || rootEl;
+                                if (targetRoot) renderIntoCard(targetRoot, movie, cachedRenderState);
+                            });
+                        }
                     }
                     return;
                 }
@@ -2156,7 +2798,8 @@
                     apiError: keys.mdblistKey ? '' : 'NO_KEY',
                     ratingsLoading: Boolean(keys.mdblistKey),
                     userTraktVote: '',
-                    initialTraktVote: ''
+                    initialTraktVote: '',
+                    watchedStatus: null
                 };
 
                 var mdblistDone = !keys.mdblistKey;
@@ -2210,6 +2853,13 @@
                                 state.initialTraktVote = userReactionKey;
                                 syncCardAndCache();
                             });
+
+                            if (settings.showWatchedBadge) {
+                                fetchUserWatchedStatusForMedia(movie, json, function(watchedStatus) {
+                                    state.watchedStatus = watchedStatus;
+                                    syncCardAndCache();
+                                });
+                            }
                         }
                     }
                 });
@@ -2228,6 +2878,7 @@
         registerManifest();
         registerSettings();
         attachFullListener();
+        attachPlayerScrobbler();
     }
 
     if (window.appready) {

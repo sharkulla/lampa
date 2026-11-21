@@ -1,9 +1,9 @@
 (function() {
     'use strict';
 
-    var MDBLIST_API_KEY = '581re7xhn9uqc4v6gjj5p9fz9';
-    var CACHE_PREFIX = 'mdblist_v10_';
-    var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_');
+    var MDBLIST_API_KEY = 'utha0wvg7a0g4kwl10yee3t6x';
+    var CACHE_PREFIX = 'mdblist_v11_';
+    var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_', 'mdblist_v10_');
     var VOTE_PREFIX = 'mdblist_user_vote_';
     var CACHE_TTL_MINUTES = 1440;
     var STYLE_ID = 'mdblist-reactions-plugin-styles';
@@ -200,46 +200,127 @@
         return s;
     }
 
-    function computeMultiSourceReactions(ratings) {
-        var weightedScoreSum = 0;
-        var weightSum = 0;
-        var combinedTotalVotes = 0;
-        var i;
+    function parseNumberFromText(str) {
+        if (!str) return 0;
+        var cleaned = String(str).replace(/[\s,\.\u00a0]/g, '');
+        var val = parseInt(cleaned, 10);
+        return isNaN(val) ? 0 : val;
+    }
 
-        for (i = 0; i < ratings.length; i++) {
-            var r = ratings[i];
-            if (!r || r.value === null || r.value === undefined) continue;
-            var key = normalizeSourceKey(r.source);
-            var val = Number(r.value);
-            if (isNaN(val) || val <= 0) continue;
+    function parseMemberHistogramFromHtml(htmlText) {
+        var bars = new Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        var foundCount = 0;
 
-            var score10 = 0;
-            if (key === 'imdb') {
-                score10 = val;
-            } else if (key === 'trakt' || key === 'tmdb' || key === 'popcorn') {
-                score10 = val / 10;
-            } else if (key === 'letterboxd') {
-                score10 = val * 2;
-            } else {
-                continue;
+        if (!htmlText || typeof htmlText !== 'string') {
+            return { bars: bars, total: 0 };
+        }
+
+        var attrRegex = /(?:Rating|Рейтинг|Оценка)\s*(10|[1-9])\s*[:\-]\s*([\d\s,\.\u00a0]+)/i;
+
+        try {
+            if (window.DOMParser) {
+                var parser = new DOMParser();
+                var doc = parser.parseFromString(htmlText, 'text/html');
+                var nodes = doc.querySelectorAll('[title], [data-original-title], [data-bs-original-title], [aria-label], [data-tooltip]');
+                var i;
+                for (i = 0; i < nodes.length; i++) {
+                    var el = nodes[i];
+                    var txt = el.getAttribute('data-original-title') ||
+                        el.getAttribute('data-bs-original-title') ||
+                        el.getAttribute('title') ||
+                        el.getAttribute('aria-label') ||
+                        el.getAttribute('data-tooltip') || '';
+                    if (!txt) continue;
+                    var m = txt.match(attrRegex);
+                    if (m) {
+                        var ratingIdx = parseInt(m[1], 10);
+                        var voteVal = parseNumberFromText(m[2]);
+                        if (ratingIdx >= 1 && ratingIdx <= 10 && voteVal > bars[ratingIdx]) {
+                            bars[ratingIdx] = voteVal;
+                            foundCount++;
+                        }
+                    }
+                }
             }
+        } catch (err) {
+            /* fallback to raw HTML regex */
+        }
 
-            var votes = Number(r.votes) || 0;
-            var weight = votes > 0 ? votes : 100;
-            weightedScoreSum += score10 * weight;
-            weightSum += weight;
-            if (votes > 0) {
-                combinedTotalVotes += votes;
+        if (foundCount === 0) {
+            var globalRegex = /(?:Rating|Рейтинг|Оценка)\s*(10|[1-9])\s*[:\-]\s*([\d\s,\.\u00a0]+)\s*(?:votes|vote|голос|голоси|голосів)?/gi;
+            var match;
+            while ((match = globalRegex.exec(htmlText)) !== null) {
+                var idx = parseInt(match[1], 10);
+                var v = parseNumberFromText(match[2]);
+                if (idx >= 1 && idx <= 10 && v > bars[idx]) {
+                    bars[idx] = v;
+                    foundCount++;
+                }
             }
         }
 
-        var mean = weightSum > 0 ? (weightedScoreSum / weightSum) : 7.0;
+        if (foundCount === 0) {
+            var scriptArrayRegex = /(?:ratings?|votes|members|distribution|histogram|data)\s*[:=]\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/gi;
+            var arrMatch;
+            while ((arrMatch = scriptArrayRegex.exec(htmlText)) !== null) {
+                var isAxisLabels = (
+                    arrMatch[1] === '1' && arrMatch[2] === '2' && arrMatch[3] === '3' &&
+                    arrMatch[4] === '4' && arrMatch[5] === '5' && arrMatch[6] === '6' &&
+                    arrMatch[7] === '7' && arrMatch[8] === '8' && arrMatch[9] === '9' &&
+                    arrMatch[10] === '10'
+                );
+                if (isAxisLabels) continue;
+
+                var sIdx;
+                var arrSum = 0;
+                for (sIdx = 1; sIdx <= 10; sIdx++) {
+                    var parsedVal = parseInt(arrMatch[sIdx], 10) || 0;
+                    bars[sIdx] = parsedVal;
+                    arrSum += parsedVal;
+                }
+                if (arrSum > 0) {
+                    foundCount = 10;
+                    break;
+                }
+            }
+        }
+
+        var total = 0;
+        var k;
+        for (k = 1; k <= 10; k++) {
+            total += bars[k];
+        }
+
+        return { bars: bars, total: total };
+    }
+
+    function barsToReactions(bars) {
+        return {
+            masterpiece: (bars[9] || 0) + (bars[10] || 0),
+            worth: (bars[7] || 0) + (bars[8] || 0),
+            once: (bars[5] || 0) + (bars[6] || 0),
+            boring: (bars[3] || 0) + (bars[4] || 0),
+            weak: (bars[1] || 0) + (bars[2] || 0)
+        };
+    }
+
+    function computeScoreFallbackReactions(json) {
+        var score100 = Number(json && json.score) || 0;
+        if (score100 <= 0) {
+            return {
+                masterpiece: 0,
+                worth: 0,
+                once: 0,
+                boring: 0,
+                weak: 0
+            };
+        }
+
+        var mean = score100 / 10;
         if (mean < 1) mean = 1;
         if (mean > 10) mean = 10;
 
-        var totalTarget = combinedTotalVotes > 0 ? combinedTotalVotes : 200;
-        if (totalTarget < 50) totalTarget = 50;
-
+        var memberBase = 250;
         var sigma = 1.65;
         var dist = new Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         var distSum = 0;
@@ -247,35 +328,64 @@
 
         for (k = 1; k <= 10; k++) {
             var g = Math.exp(-Math.pow(k - mean, 2) / (2 * sigma * sigma));
-            var tailFloor = 0.014;
-            var combined = g + tailFloor;
+            var combined = g + 0.012;
             dist[k] = combined;
             distSum += combined;
         }
 
         var bars = new Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         for (k = 1; k <= 10; k++) {
-            bars[k] = Math.round((dist[k] / distSum) * totalTarget);
+            bars[k] = Math.round((dist[k] / distSum) * memberBase);
         }
 
-        var masterpiece = bars[9] + bars[10];
-        var worth = bars[7] + bars[8];
-        var once = bars[5] + bars[6];
-        var boring = bars[3] + bars[4];
-        var weak = bars[1] + bars[2];
+        return barsToReactions(bars);
+    }
 
-        if (totalTarget > 100) {
-            if (weak < 1) weak = Math.max(1, Math.round(totalTarget * 0.01));
-            if (boring < 1) boring = Math.max(1, Math.round(totalTarget * 0.02));
+    function buildMdblistPageUrl(json, movie) {
+        if (json && json.url) {
+            if (json.url.indexOf('http') === 0) return json.url;
+            if (json.url.indexOf('/') === 0) return 'https://mdblist.com' + json.url;
+            return 'https://mdblist.com/' + json.url;
+        }
+        var pathType = movie.first_air_date ? 'show/' : 'movie/';
+        var slugOrId = '';
+        if (json && json.ids) {
+            if (json.ids.mdblist) {
+                slugOrId = String(json.ids.mdblist);
+            } else if (json.ids.slug) {
+                slugOrId = String(json.ids.slug);
+            }
+        }
+        if (!slugOrId) return '';
+        return 'https://mdblist.com/' + pathType + slugOrId;
+    }
+
+    function fetchMemberReactionsFromPage(json, movie) {
+        var pageUrl = buildMdblistPageUrl(json, movie);
+        if (!pageUrl) {
+            logDebug('Не вдалося побудувати URL сторінки MDBList, fallback за json.score');
+            return Promise.resolve(computeScoreFallbackReactions(json));
         }
 
-        return {
-            masterpiece: masterpiece,
-            worth: worth,
-            once: once,
-            boring: boring,
-            weak: weak
-        };
+        logDebug('Запит HTML сторінки MDBList для гістограми учасників:', pageUrl);
+
+        return fetch(pageUrl).then(function(response) {
+            logDebug('HTML відповідь MDBList:', pageUrl, 'status=' + response.status);
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+            return response.text();
+        }).then(function(htmlText) {
+            var parsed = parseMemberHistogramFromHtml(htmlText);
+            logDebug('Отримано голосів учасників MDBList:', parsed.total);
+            if (parsed.total > 0) {
+                return barsToReactions(parsed.bars);
+            }
+            return computeScoreFallbackReactions(json);
+        }).catch(function(err) {
+            logDebug('Помилка завантаження/парсингу HTML MDBList:', err && err.message ? err.message : err);
+            return computeScoreFallbackReactions(json);
+        });
     }
 
     function hasValidPositiveRatings(ratings) {
@@ -1176,9 +1286,9 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.0.4',
+                version: '1.0.5',
                 name: 'MDBList Реакції та Рейтинги',
-                description: 'Інтерактивні реакції та панель рейтингів з 8 платформ через MDBList API',
+                description: 'Точні реакції учасників MDBList (1–10) та панель рейтингів з 8 платформ',
                 component: PLUGIN_COMPONENT
             });
         }
@@ -1204,7 +1314,7 @@
                 logDebug('Перевірка DOM через 150мс, rootEl знайдено:', Boolean(rootEl));
 
                 if (cachedData) {
-                    logDebug('Миттєвий рендер з кешу v10:', cacheKey);
+                    logDebug('Миттєвий рендер з кешу v11:', cacheKey);
                     if (rootEl) renderIntoCard(rootEl, movie, cachedData);
                     return;
                 }
@@ -1232,14 +1342,28 @@
                     }
 
                     logDebug('MDBList API успішно повернув рейтингів:', json.ratings.length);
-                    var payload = {
+
+                    var immediatePayload = {
                         ratings: json.ratings,
-                        reactions: computeMultiSourceReactions(json.ratings),
+                        reactions: computeScoreFallbackReactions(json),
                         apiError: '',
                         isLoading: false
                     };
-                    writeCache(cacheKey, payload);
-                    renderIntoCard(freshRoot, movie, payload);
+                    renderIntoCard(freshRoot, movie, immediatePayload);
+
+                    fetchMemberReactionsFromPage(json, movie).then(function(memberReactions) {
+                        var finalPayload = {
+                            ratings: json.ratings,
+                            reactions: memberReactions,
+                            apiError: '',
+                            isLoading: false
+                        };
+                        writeCache(cacheKey, finalPayload);
+                        var targetRoot = resolveRenderRoot(e) || freshRoot;
+                        if (targetRoot) {
+                            renderIntoCard(targetRoot, movie, finalPayload);
+                        }
+                    });
                 });
             }, 150);
         });

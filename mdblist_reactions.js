@@ -2,8 +2,8 @@
     'use strict';
 
     var MDBLIST_API_KEY = 'utha0wvg7a0g4kwl10yee3t6x';
-    var CACHE_PREFIX = 'mdblist_v9_';
-    var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_');
+    var CACHE_PREFIX = 'mdblist_v10_';
+    var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_');
     var VOTE_PREFIX = 'mdblist_user_vote_';
     var CACHE_TTL_MINUTES = 1440;
     var STYLE_ID = 'mdblist-reactions-plugin-styles';
@@ -91,7 +91,7 @@
             if (!raw || typeof raw !== 'object') {
                 return null;
             }
-            if (raw._ts && raw.payload && !raw.payload.isFallback && !raw.payload.apiError && raw.payload.ratings && raw.payload.ratings.length > 0) {
+            if (raw._ts && raw.payload && !raw.payload.apiError && !raw.payload.isLoading && raw.payload.ratings && raw.payload.ratings.length > 0) {
                 var ageMs = new Date().getTime() - Number(raw._ts);
                 if (ageMs >= 0 && ageMs < CACHE_TTL_MINUTES * 60 * 1000) {
                     return raw.payload;
@@ -107,7 +107,7 @@
 
     function writeCache(cacheKey, payload) {
         try {
-            if (!payload || payload.isFallback || payload.apiError || !payload.ratings || payload.ratings.length === 0) return;
+            if (!payload || payload.apiError || payload.isLoading || !payload.ratings || payload.ratings.length === 0) return;
             if (!window.Lampa || !Lampa.Storage) return;
             var wrapper = {
                 _ts: new Date().getTime(),
@@ -200,7 +200,7 @@
         return s;
     }
 
-    function computeMultiSourceReactions(ratings, fallbackMean, fallbackVotes) {
+    function computeMultiSourceReactions(ratings) {
         var weightedScoreSum = 0;
         var weightSum = 0;
         var combinedTotalVotes = 0;
@@ -233,11 +233,11 @@
             }
         }
 
-        var mean = weightSum > 0 ? (weightedScoreSum / weightSum) : (Number(fallbackMean) || 7.0);
+        var mean = weightSum > 0 ? (weightedScoreSum / weightSum) : 7.0;
         if (mean < 1) mean = 1;
         if (mean > 10) mean = 10;
 
-        var totalTarget = combinedTotalVotes > 0 ? combinedTotalVotes : (Number(fallbackVotes) || 150);
+        var totalTarget = combinedTotalVotes > 0 ? combinedTotalVotes : 200;
         if (totalTarget < 50) totalTarget = 50;
 
         var sigma = 1.65;
@@ -278,25 +278,15 @@
         };
     }
 
-    function buildFallbackData(movie, apiError) {
-        var ratings = new Array();
-        var voteAvg = Number(movie && movie.vote_average) || 0;
-        var voteCount = Number(movie && movie.vote_count) || 0;
-
-        if (voteAvg > 0) {
-            ratings.push({
-                source: 'tmdb',
-                value: Math.round(voteAvg * 10),
-                votes: voteCount
-            });
+    function hasValidPositiveRatings(ratings) {
+        if (!ratings || !ratings.length) return false;
+        var i;
+        for (i = 0; i < ratings.length; i++) {
+            if (ratings[i] && Number(ratings[i].value) > 0) {
+                return true;
+            }
         }
-
-        return {
-            ratings: ratings,
-            reactions: computeMultiSourceReactions(ratings, voteAvg > 0 ? voteAvg : 7.0, voteCount),
-            isFallback: true,
-            apiError: apiError || ''
-        };
+        return false;
     }
 
     function xhrGetJson(url, onSuccess, onError) {
@@ -322,67 +312,101 @@
             if (xhr.readyState !== 4) return;
             logDebug('XHR відповідь:', url, 'status=' + xhr.status);
             if (xhr.status !== 200) {
-                finishError('HTTP ' + xhr.status + (xhr.status === 0 ? ' (CORS або мережа)' : ''));
+                finishError('HTTP ' + xhr.status + (xhr.status === 0 ? ' (Network/CORS blocked)' : ''));
                 return;
             }
             var parsed = null;
             try {
                 parsed = JSON.parse(xhr.responseText);
+                if (parsed && typeof parsed.contents === 'string' && !parsed.ratings) {
+                    parsed = JSON.parse(parsed.contents);
+                }
             } catch (parseErr) {
-                finishError('Некоректний JSON');
+                finishError('Invalid JSON response');
                 return;
             }
             if (!parsed || parsed.response === false || parsed.error) {
                 var apiErr = (parsed && (parsed.error || parsed.message))
                     ? String(parsed.error || parsed.message)
                     : 'response: false';
-                finishError(apiErr);
+                finishError('HTTP 200 (' + apiErr + ')');
                 return;
             }
-            if (!parsed.ratings || parsed.ratings.length === 0) {
-                finishError('Порожній масив ratings');
+            if (!hasValidPositiveRatings(parsed.ratings)) {
+                finishError('HTTP 200 (Порожній ratings)');
                 return;
             }
             finishSuccess(parsed);
         };
 
         xhr.ontimeout = function() {
-            finishError('Таймаут (12с)');
+            finishError('Timeout (12s)');
         };
 
         xhr.onerror = function() {
-            finishError('Помилка мережі / CORS (status ' + xhr.status + ')');
+            finishError('HTTP ' + xhr.status + ' / Network blocked');
         };
 
         try {
             xhr.send();
         } catch (sendErr) {
-            finishError(sendErr && sendErr.message ? sendErr.message : 'Помилка запиту XHR');
+            finishError(sendErr && sendErr.message ? sendErr.message : 'XHR send failed');
         }
     }
 
-    function fetchMdblistViaXhr(movie, callback) {
+    function fetchWithProxyChain(targetUrl, callback) {
+        var attempts = new Array(
+            { name: 'Direct', url: targetUrl },
+            { name: 'corsproxy.io', url: 'https://corsproxy.io/?' + encodeURIComponent(targetUrl) },
+            { name: 'allorigins', url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(targetUrl) }
+        );
+        var errors = new Array();
+
+        function tryNext(idx) {
+            if (idx >= attempts.length) {
+                callback(errors.join(' | '), null);
+                return;
+            }
+            var attempt = attempts[idx];
+            logDebug('Спроба #' + (idx + 1) + ' (' + attempt.name + '):', attempt.url);
+
+            xhrGetJson(attempt.url, function(json) {
+                logDebug('Успіх через ' + attempt.name + ', рейтингів:', json.ratings.length);
+                callback(null, json);
+            }, function(errMsg) {
+                var detail = attempt.name + ' -> ' + errMsg;
+                logDebug('Невдача:', detail);
+                errors.push(detail);
+                tryNext(idx + 1);
+            });
+        }
+
+        tryNext(0);
+    }
+
+    function fetchMdblistViaChain(movie, callback) {
         var type = movie.first_air_date ? 'show' : 'movie';
-        var tmdbUrl = 'https://api.mdblist.com/tmdb/' + type + '/' + movie.id + '?apikey=' + MDBLIST_API_KEY;
+        var targetUrl = 'https://api.mdblist.com/tmdb/' + type + '/' + movie.id + '?apikey=' + MDBLIST_API_KEY;
         var imdbId = movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
 
-        logDebug('XHR запит до MDBList:', tmdbUrl);
-
-        xhrGetJson(tmdbUrl, function(json) {
-            callback(null, json);
-        }, function(errMsg) {
-            logDebug('Помилка TMDB запиту MDBList:', errMsg);
-            if (imdbId) {
+        fetchWithProxyChain(targetUrl, function(errSummary, json) {
+            if (!errSummary && json) {
+                callback(null, json);
+                return;
+            }
+            var isAuthErr = errSummary && (errSummary.indexOf('HTTP 401') !== -1 || errSummary.indexOf('HTTP 403') !== -1 || errSummary.indexOf('Invalid API') !== -1);
+            if (imdbId && !isAuthErr) {
                 var imdbUrl = 'https://api.mdblist.com/imdb/' + imdbId + '?apikey=' + MDBLIST_API_KEY;
-                logDebug('Повторний XHR запит за IMDb ID:', imdbUrl);
-                xhrGetJson(imdbUrl, function(json2) {
-                    callback(null, json2);
-                }, function(errMsg2) {
-                    logDebug('Помилка IMDb запиту MDBList:', errMsg2);
-                    callback(errMsg2 || errMsg, null);
+                logDebug('Повторний пошук за IMDb ID через проксі-ланцюг:', imdbId);
+                fetchWithProxyChain(imdbUrl, function(errSummary2, json2) {
+                    if (!errSummary2 && json2) {
+                        callback(null, json2);
+                    } else {
+                        callback(errSummary2 || errSummary, null);
+                    }
                 });
             } else {
-                callback(errMsg, null);
+                callback(errSummary, null);
             }
         });
     }
@@ -761,14 +785,23 @@
             '  line-height: 1.1;' +
             '}' +
 
-            '.mdb-diagnostic-badge {' +
+            '.mdb-loading-badge {' +
             '  display: inline-block;' +
-            '  padding: 0.28em 0.65em;' +
+            '  font-size: 0.85em;' +
+            '  color: rgba(255, 255, 255, 0.55);' +
+            '}' +
+
+            '.mdb-error-badge {' +
+            '  display: inline-block;' +
+            '  padding: 0.38em 0.75em;' +
             '  border-radius: 6px;' +
-            '  font-size: 0.82em;' +
-            '  color: rgba(255, 255, 255, 0.65);' +
-            '  background: rgba(255, 90, 90, 0.14);' +
-            '  border: 1px solid rgba(255, 90, 90, 0.32);' +
+            '  font-size: 0.86em;' +
+            '  font-weight: 600;' +
+            '  color: #ff8a65;' +
+            '  background: rgba(255, 82, 82, 0.16);' +
+            '  border: 1px solid rgba(255, 110, 64, 0.48);' +
+            '  line-height: 1.35;' +
+            '  word-break: break-word;' +
             '}';
 
         var styleEl = document.createElement('style');
@@ -867,6 +900,24 @@
         ratingsRow.className = 'mdb-ratings-row';
         var renderedRatings = 0;
 
+        if (data.isLoading) {
+            var loadEl = document.createElement('div');
+            loadEl.className = 'mdb-loading-badge';
+            loadEl.textContent = 'Завантаження рейтингів MDBList...';
+            ratingsRow.appendChild(loadEl);
+            wrapper.appendChild(ratingsRow);
+            return wrapper;
+        }
+
+        if (data.apiError) {
+            var errEl = document.createElement('div');
+            errEl.className = 'mdb-error-badge';
+            errEl.textContent = 'MDBList Error: ' + data.apiError;
+            ratingsRow.appendChild(errEl);
+            wrapper.appendChild(ratingsRow);
+            return wrapper;
+        }
+
         if (data.ratings && data.ratings.length > 0) {
             var ratingMap = {};
             var rIdx;
@@ -931,17 +982,11 @@
                 ratingsRow.appendChild(itemEl);
                 renderedRatings++;
             }
-        }
 
-        if (data.apiError) {
-            var diagEl = document.createElement('div');
-            diagEl.className = 'mdb-diagnostic-badge';
-            diagEl.textContent = 'MDBList API Error: ' + data.apiError;
-            ratingsRow.appendChild(diagEl);
-        }
-
-        if (renderedRatings > 0 || data.apiError) {
-            wrapper.appendChild(ratingsRow);
+            logDebug('Відображено іконок рейтингів:', renderedRatings);
+            if (renderedRatings > 0) {
+                wrapper.appendChild(ratingsRow);
+            }
         }
 
         if (wrapper.children.length === 0) {
@@ -989,32 +1034,28 @@
         var settings = getSettings();
         var wrapper = buildWrapperElement(data, movie, settings);
         if (!wrapper) {
-            logDebug('Порожній блок wrapper (усі секції вимкнені або без даних)');
+            logDebug('Порожній блок wrapper');
             return false;
         }
 
         var reactionsTarget = rootEl.querySelector('.full-start__reactions, .full-start-new__reactions');
         if (reactionsTarget && reactionsTarget.parentNode) {
-            logDebug('DOM контейнер знайдено (reactionsTarget):', reactionsTarget.className);
             reactionsTarget.parentNode.insertBefore(wrapper, reactionsTarget);
             return true;
         }
 
         var buttonsTarget = rootEl.querySelector('.full-start__buttons, .full-start-new__buttons');
         if (buttonsTarget && buttonsTarget.parentNode) {
-            logDebug('DOM контейнер знайдено (buttonsTarget):', buttonsTarget.className);
             buttonsTarget.parentNode.insertBefore(wrapper, buttonsTarget);
             return true;
         }
 
         var bodyTarget = rootEl.querySelector('.full-start__body, .full-start-new__body, .full-start-new__left, .full-start');
         if (bodyTarget) {
-            logDebug('DOM контейнер знайдено (bodyTarget):', bodyTarget.className);
             bodyTarget.appendChild(wrapper);
             return true;
         }
 
-        logDebug('Не знайдено стандартних контейнерів, додано у rootEl');
         rootEl.appendChild(wrapper);
         return true;
     }
@@ -1135,7 +1176,7 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.0.3',
+                version: '1.0.4',
                 name: 'MDBList Реакції та Рейтинги',
                 description: 'Інтерактивні реакції та панель рейтингів з 8 платформ через MDBList API',
                 component: PLUGIN_COMPONENT
@@ -1163,36 +1204,39 @@
                 logDebug('Перевірка DOM через 150мс, rootEl знайдено:', Boolean(rootEl));
 
                 if (cachedData) {
-                    logDebug('Миттєвий рендер з кешу v9:', cacheKey);
+                    logDebug('Миттєвий рендер з кешу v10:', cacheKey);
                     if (rootEl) renderIntoCard(rootEl, movie, cachedData);
                     return;
                 }
 
                 if (rootEl) {
-                    logDebug('Первинний рендер TMDB fallback до відповіді MDBList XHR');
-                    renderIntoCard(rootEl, movie, buildFallbackData(movie, ''));
+                    renderIntoCard(rootEl, movie, { isLoading: true });
                 }
 
-                fetchMdblistViaXhr(movie, function(errMsg, json) {
+                fetchMdblistViaChain(movie, function(errSummary, json) {
                     var freshRoot = resolveRenderRoot(e) || rootEl;
                     if (!freshRoot) {
-                        logDebug('Не знайдено rootEl після завершення XHR запиту');
+                        logDebug('Не знайдено rootEl після завершення запиту');
                         return;
                     }
 
-                    if (errMsg || !json || !json.ratings || json.ratings.length === 0) {
-                        var finalErr = errMsg || 'Порожні дані MDBList';
-                        logDebug('MDBList XHR помилка, рендер діагностичного бейджа:', finalErr);
-                        renderIntoCard(freshRoot, movie, buildFallbackData(movie, finalErr));
+                    if (errSummary || !json || !hasValidPositiveRatings(json.ratings)) {
+                        var finalErr = errSummary || 'Порожній масив ratings';
+                        logDebug('Усі спроби MDBList API завершилися помилкою:', finalErr);
+                        renderIntoCard(freshRoot, movie, {
+                            ratings: new Array(),
+                            reactions: null,
+                            apiError: finalErr
+                        });
                         return;
                     }
 
-                    logDebug('MDBList XHR успішно повернув рейтингів:', json.ratings.length);
+                    logDebug('MDBList API успішно повернув рейтингів:', json.ratings.length);
                     var payload = {
                         ratings: json.ratings,
-                        reactions: computeMultiSourceReactions(json.ratings, movie.vote_average, movie.vote_count),
-                        isFallback: false,
-                        apiError: ''
+                        reactions: computeMultiSourceReactions(json.ratings),
+                        apiError: '',
+                        isLoading: false
                     };
                     writeCache(cacheKey, payload);
                     renderIntoCard(freshRoot, movie, payload);

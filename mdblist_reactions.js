@@ -10,11 +10,11 @@
     var initialized = false;
 
     var REACTION_DEFS = new Array(
-        { key: 'masterpiece', emoji: '🔥', label: 'Шедевр' },
-        { key: 'worth', emoji: '👍', label: 'Варто глянути' },
-        { key: 'once', emoji: '🤔', label: 'На один раз' },
-        { key: 'boring', emoji: '😴', label: 'Нудно' },
-        { key: 'weak', emoji: '💩', label: 'Слабко' }
+        { key: 'masterpiece', emoji: '🔥', label: 'Шедевр', order: 0 },
+        { key: 'worth', emoji: '👍', label: 'Варто глянути', order: 1 },
+        { key: 'once', emoji: '🤔', label: 'На один раз', order: 2 },
+        { key: 'boring', emoji: '😴', label: 'Нудно', order: 3 },
+        { key: 'weak', emoji: '💩', label: 'Слабко', order: 4 }
     );
 
     var PLATFORM_ORDER = new Array(
@@ -27,6 +27,17 @@
         'metacritic',
         'rogerebert'
     );
+
+    function logDebug() {
+        if (window.console && typeof window.console.log === 'function') {
+            var args = new Array('[MDBList Plugin]');
+            var i;
+            for (i = 0; i < arguments.length; i++) {
+                args.push(arguments[i]);
+            }
+            window.console.log.apply(window.console, args);
+        }
+    }
 
     function getStorageBool(key, defaultVal) {
         if (!window.Lampa || !Lampa.Storage) return defaultVal;
@@ -106,7 +117,7 @@
             };
             Lampa.Storage.set(cacheKey, wrapper);
         } catch (err) {
-            /* ignore storage quota errors */
+            /* ignore storage errors */
         }
     }
 
@@ -133,6 +144,7 @@
         } catch (err) {
             /* ignore */
         }
+        logDebug('Кеш очищено, видалено записів:', removed);
         if (window.Lampa && Lampa.Noty) {
             Lampa.Noty.show('Кеш MDBList очищено');
         }
@@ -247,7 +259,7 @@
         return { bars: bars, total: total };
     }
 
-    function computeGaussianReactions(ratings) {
+    function computeGaussianReactions(ratings, fallbackMean, fallbackVotes) {
         var sumWeighted = 0;
         var sumWeights = 0;
         var maxVotes = 0;
@@ -278,7 +290,7 @@
             sumWeights += weight;
         }
 
-        var mean = sumWeights > 0 ? (sumWeighted / sumWeights) : 7.0;
+        var mean = sumWeights > 0 ? (sumWeighted / sumWeights) : (Number(fallbackMean) || 7.0);
         if (mean < 1) mean = 1;
         if (mean > 10) mean = 10;
 
@@ -293,9 +305,13 @@
             distSum += g;
         }
 
-        var baseTotal = 600;
+        var baseTotal = Number(fallbackVotes) || 0;
         if (maxVotes > 0) {
-            baseTotal = Math.round(Math.min(2500, Math.max(120, Math.sqrt(maxVotes) * 4)));
+            baseTotal = Math.round(Math.min(2500, Math.max(80, Math.sqrt(maxVotes) * 4)));
+        } else if (baseTotal <= 0) {
+            baseTotal = 120;
+        } else if (baseTotal > 2500) {
+            baseTotal = Math.round(Math.min(2500, Math.sqrt(baseTotal) * 4));
         }
 
         var bars = new Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
@@ -324,6 +340,27 @@
         };
     }
 
+    function buildFallbackData(movie) {
+        var ratings = new Array();
+        var voteAvg = Number(movie && movie.vote_average) || 0;
+        var voteCount = Number(movie && movie.vote_count) || 0;
+
+        if (voteAvg > 0) {
+            ratings.push({
+                source: 'tmdb',
+                value: Math.round(voteAvg * 10),
+                votes: voteCount
+            });
+        }
+
+        return {
+            ratings: ratings,
+            reactions: computeGaussianReactions(ratings, voteAvg > 0 ? voteAvg : 7.0, voteCount),
+            pageUrl: '',
+            isFallback: true
+        };
+    }
+
     function resolvePageUrl(json, type) {
         if (json && json.url) {
             if (json.url.indexOf('http') === 0) return json.url;
@@ -338,6 +375,7 @@
 
     function fetchJson(url) {
         return fetch(url).then(function(response) {
+            logDebug('API відповідь:', url, 'status=' + response.status);
             if (!response.ok) {
                 throw new Error('HTTP ' + response.status);
             }
@@ -347,6 +385,7 @@
 
     function fetchText(url) {
         return fetch(url).then(function(response) {
+            logDebug('HTML сторінка:', url, 'status=' + response.status);
             if (!response.ok) {
                 throw new Error('HTTP ' + response.status);
             }
@@ -360,36 +399,45 @@
         var cached = readCache(cacheKey);
 
         if (cached) {
+            logDebug('Знайдено валідний кеш для:', cacheKey);
             return Promise.resolve(cached);
         }
 
         var tmdbUrl = 'https://api.mdblist.com/tmdb/' + type + '/' + movie.id + '?apikey=' + MDBLIST_API_KEY;
         var imdbId = movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
 
-        return fetchJson(tmdbUrl).catch(function() {
+        logDebug('Запит до MDBList API:', tmdbUrl);
+
+        return fetchJson(tmdbUrl).catch(function(err) {
+            logDebug('Помилка TMDB запиту MDBList:', err && err.message ? err.message : err);
             return null;
         }).then(function(json) {
             var hasRatings = json && json.ratings && json.ratings.length > 0;
             if (!hasRatings && imdbId) {
                 var imdbUrl = 'https://api.mdblist.com/imdb/' + imdbId + '?apikey=' + MDBLIST_API_KEY;
-                return fetchJson(imdbUrl).catch(function() {
+                logDebug('Повторний запит за IMDb ID:', imdbUrl);
+                return fetchJson(imdbUrl).catch(function(err) {
+                    logDebug('Помилка IMDb запиту MDBList:', err && err.message ? err.message : err);
                     return json;
                 });
             }
             return json;
         }).then(function(json) {
             if (!json || !json.ratings || json.ratings.length === 0) {
+                logDebug('MDBList повернув порожні рейтинги для ID:', movie.id);
                 return null;
             }
 
+            logDebug('Отримано рейтингів з MDBList:', json.ratings.length);
             var pageUrl = resolvePageUrl(json, type);
             var ratingsCopy = json.ratings;
 
             if (!pageUrl) {
                 var fallbackOnly = {
                     ratings: ratingsCopy,
-                    reactions: computeGaussianReactions(ratingsCopy),
-                    pageUrl: ''
+                    reactions: computeGaussianReactions(ratingsCopy, movie.vote_average, movie.vote_count),
+                    pageUrl: '',
+                    isFallback: false
                 };
                 writeCache(cacheKey, fallbackOnly);
                 return fallbackOnly;
@@ -397,22 +445,26 @@
 
             return fetchText(pageUrl).then(function(htmlText) {
                 var parsed = parseHistogramFromHtml(htmlText);
+                logDebug('Зібрано голосів з гістограми MDBList:', parsed.total);
                 var reactions = parsed.total > 0
                     ? barsToReactions(parsed.bars)
-                    : computeGaussianReactions(ratingsCopy);
+                    : computeGaussianReactions(ratingsCopy, movie.vote_average, movie.vote_count);
 
                 var payload = {
                     ratings: ratingsCopy,
                     reactions: reactions,
-                    pageUrl: pageUrl
+                    pageUrl: pageUrl,
+                    isFallback: false
                 };
                 writeCache(cacheKey, payload);
                 return payload;
-            }).catch(function() {
+            }).catch(function(err) {
+                logDebug('Не вдалося спарсити HTML сторінку MDBList, використовуються розрахункові реакції:', err && err.message ? err.message : err);
                 var fallbackPayload = {
                     ratings: ratingsCopy,
-                    reactions: computeGaussianReactions(ratingsCopy),
-                    pageUrl: pageUrl
+                    reactions: computeGaussianReactions(ratingsCopy, movie.vote_average, movie.vote_count),
+                    pageUrl: pageUrl,
+                    isFallback: false
                 };
                 writeCache(cacheKey, fallbackPayload);
                 return fallbackPayload;
@@ -596,11 +648,38 @@
         }
     }
 
+    function buildSortedPillsList(reactions, currentVote) {
+        var list = new Array();
+        var i;
+        for (i = 0; i < REACTION_DEFS.length; i++) {
+            var def = REACTION_DEFS[i];
+            var baseCount = Number(reactions[def.key]) || 0;
+            var isSelected = (currentVote === def.key);
+            list.push({
+                key: def.key,
+                emoji: def.emoji,
+                label: def.label,
+                order: def.order,
+                count: baseCount + (isSelected ? 1 : 0),
+                isSelected: isSelected
+            });
+        }
+
+        list.sort(function(a, b) {
+            if (b.count !== a.count) return b.count - a.count;
+            return a.order - b.order;
+        });
+
+        return list;
+    }
+
     function injectStyles() {
         if (document.getElementById(STYLE_ID)) return;
 
         var css = '' +
             '.mdb-reactions-wrapper {' +
+            '  position: relative;' +
+            '  z-index: 2;' +
             '  display: block;' +
             '  width: 100%;' +
             '  margin: 0.7em 0 1.1em 0;' +
@@ -776,7 +855,6 @@
     function buildWrapperElement(data, movie, settings) {
         var type = movie.first_air_date ? 'show' : 'movie';
         var mediaVoteKey = type + '_' + movie.id;
-        var currentVote = getUserVote(mediaVoteKey);
 
         var wrapper = document.createElement('div');
         var scaleClass = 'mdb-scale-10';
@@ -791,72 +869,71 @@
             pillsRow.className = 'mdb-pills-row';
             var lastTapTs = 0;
 
-            var createPill = function(def) {
-                var baseCount = Number(data.reactions[def.key]) || 0;
-                var isSelected = (currentVote === def.key);
-                var pill = document.createElement('div');
-                pill.className = 'mdb-pill selector' + (isSelected ? ' active' : '');
-                pill.setAttribute('data-reaction-key', def.key);
-
-                var tooltip = document.createElement('span');
-                tooltip.className = 'mdb-pill-tooltip';
-                tooltip.textContent = def.label;
-
-                var emojiEl = document.createElement('span');
-                emojiEl.className = 'mdb-pill-emoji';
-                emojiEl.textContent = def.emoji;
-
-                var countEl = document.createElement('span');
-                countEl.className = 'mdb-pill-count';
-                countEl.textContent = formatPillCount(baseCount + (isSelected ? 1 : 0));
-
-                pill.appendChild(tooltip);
-                pill.appendChild(emojiEl);
-                pill.appendChild(countEl);
-
-                var handleToggle = function(ev) {
-                    if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
-                    var now = new Date().getTime();
-                    if (now - lastTapTs < 260) return;
-                    lastTapTs = now;
-
-                    var prevVote = getUserVote(mediaVoteKey);
-                    var nextVote = (prevVote === def.key) ? '' : def.key;
-                    setUserVote(mediaVoteKey, nextVote);
-
-                    var allPills = pillsRow.querySelectorAll('.mdb-pill');
-                    var j;
-                    for (j = 0; j < allPills.length; j++) {
-                        var p = allPills[j];
-                        var pKey = p.getAttribute('data-reaction-key');
-                        var pBase = Number(data.reactions[pKey]) || 0;
-                        var pActive = (nextVote === pKey);
-                        if (pActive) {
-                            p.classList.add('active');
-                        } else {
-                            p.classList.remove('active');
-                        }
-                        var cntSpan = p.querySelector('.mdb-pill-count');
-                        if (cntSpan) {
-                            cntSpan.textContent = formatPillCount(pBase + (pActive ? 1 : 0));
-                        }
-                    }
-                };
-
-                pill.addEventListener('click', handleToggle);
-                if (window.$) {
-                    window.$(pill).on('hover:enter', handleToggle);
-                } else {
-                    pill.addEventListener('hover:enter', handleToggle);
+            var renderSortedPills = function(focusKey) {
+                while (pillsRow.firstChild) {
+                    pillsRow.removeChild(pillsRow.firstChild);
                 }
 
-                return pill;
+                var currentVote = getUserVote(mediaVoteKey);
+                var sortedPills = buildSortedPillsList(data.reactions, currentVote);
+                var i;
+
+                for (i = 0; i < sortedPills.length; i++) {
+                    (function(item) {
+                        var pill = document.createElement('div');
+                        pill.className = 'mdb-pill selector' + (item.isSelected ? ' active' : '');
+                        pill.setAttribute('data-reaction-key', item.key);
+
+                        var tooltip = document.createElement('span');
+                        tooltip.className = 'mdb-pill-tooltip';
+                        tooltip.textContent = item.label;
+
+                        var emojiEl = document.createElement('span');
+                        emojiEl.className = 'mdb-pill-emoji';
+                        emojiEl.textContent = item.emoji;
+
+                        var countEl = document.createElement('span');
+                        countEl.className = 'mdb-pill-count';
+                        countEl.textContent = formatPillCount(item.count);
+
+                        pill.appendChild(tooltip);
+                        pill.appendChild(emojiEl);
+                        pill.appendChild(countEl);
+
+                        var handleToggle = function(ev) {
+                            if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
+                            var now = new Date().getTime();
+                            if (now - lastTapTs < 260) return;
+                            lastTapTs = now;
+
+                            var prevVote = getUserVote(mediaVoteKey);
+                            var nextVote = (prevVote === item.key) ? '' : item.key;
+                            setUserVote(mediaVoteKey, nextVote);
+                            logDebug('Голос користувача оновлено:', mediaVoteKey, nextVote || 'скасовано');
+                            renderSortedPills(item.key);
+                        };
+
+                        pill.addEventListener('click', handleToggle);
+                        if (window.$) {
+                            window.$(pill).on('hover:enter', handleToggle);
+                        } else {
+                            pill.addEventListener('hover:enter', handleToggle);
+                        }
+
+                        pillsRow.appendChild(pill);
+
+                        if (focusKey && focusKey === item.key && window.Lampa && Lampa.Controller && typeof Lampa.Controller.collectionFocus === 'function') {
+                            try {
+                                Lampa.Controller.collectionFocus(pill);
+                            } catch (eFocus) {
+                                /* ignore focus error */
+                            }
+                        }
+                    })(sortedPills[i]);
+                }
             };
 
-            var i;
-            for (i = 0; i < REACTION_DEFS.length; i++) {
-                pillsRow.appendChild(createPill(REACTION_DEFS[i]));
-            }
+            renderSortedPills('');
             wrapper.appendChild(pillsRow);
         }
 
@@ -940,10 +1017,28 @@
         return wrapper;
     }
 
-    function renderIntoCard(renderNode, movie, data) {
-        if (!renderNode) return;
-        var rootEl = renderNode.jquery ? renderNode[0] : renderNode;
-        if (!rootEl || !rootEl.querySelector) return;
+    function resolveRenderRoot(e) {
+        var node = null;
+        if (e && e.object && e.object.activity && typeof e.object.activity.render === 'function') {
+            node = e.object.activity.render();
+        } else if (e && e.object && typeof e.object.render === 'function') {
+            node = e.object.render();
+        } else if (window.Lampa && Lampa.Activity && typeof Lampa.Activity.active === 'function') {
+            var active = Lampa.Activity.active();
+            if (active && active.activity && typeof active.activity.render === 'function') {
+                node = active.activity.render();
+            }
+        }
+        if (!node) return null;
+        var el = node.jquery ? node[0] : node;
+        return (el && el.querySelector) ? el : null;
+    }
+
+    function renderIntoCard(rootEl, movie, data) {
+        if (!rootEl || !rootEl.querySelector) {
+            logDebug('Кореневий DOM елемент картки не знайдено');
+            return false;
+        }
 
         var existingReactions = rootEl.querySelectorAll('.full-start__reactions, .full-start-new__reactions');
         var i;
@@ -960,17 +1055,35 @@
 
         var settings = getSettings();
         var wrapper = buildWrapperElement(data, movie, settings);
-        if (!wrapper) return;
-
-        var buttonsTarget = rootEl.querySelector('.full-start-new__buttons, .full-start__buttons');
-        if (buttonsTarget && buttonsTarget.parentNode) {
-            buttonsTarget.parentNode.insertBefore(wrapper, buttonsTarget);
-        } else {
-            var bodyTarget = rootEl.querySelector('.full-start-new__body, .full-start__body, .full-start');
-            if (bodyTarget) {
-                bodyTarget.appendChild(wrapper);
-            }
+        if (!wrapper) {
+            logDebug('Порожній блок wrapper (усі секції вимкнені або без даних)');
+            return false;
         }
+
+        var reactionsTarget = rootEl.querySelector('.full-start__reactions, .full-start-new__reactions');
+        if (reactionsTarget && reactionsTarget.parentNode) {
+            logDebug('DOM контейнер знайдено (reactionsTarget):', reactionsTarget.className);
+            reactionsTarget.parentNode.insertBefore(wrapper, reactionsTarget);
+            return true;
+        }
+
+        var buttonsTarget = rootEl.querySelector('.full-start__buttons, .full-start-new__buttons');
+        if (buttonsTarget && buttonsTarget.parentNode) {
+            logDebug('DOM контейнер знайдено (buttonsTarget):', buttonsTarget.className);
+            buttonsTarget.parentNode.insertBefore(wrapper, buttonsTarget);
+            return true;
+        }
+
+        var bodyTarget = rootEl.querySelector('.full-start__body, .full-start-new__body, .full-start-new__left, .full-start');
+        if (bodyTarget) {
+            logDebug('DOM контейнер знайдено (bodyTarget):', bodyTarget.className);
+            bodyTarget.appendChild(wrapper);
+            return true;
+        }
+
+        logDebug('Не вдалося знайти жодного цільового DOM контейнера у картці, додано у rootEl');
+        rootEl.appendChild(wrapper);
+        return true;
     }
 
     function registerSettings() {
@@ -1089,7 +1202,7 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.0.0',
+                version: '1.0.1',
                 name: 'MDBList Реакції та Рейтинги',
                 description: 'Інтерактивні реакції за оцінками 1–10 з MDBList та панель рейтингів з 8 платформ',
                 component: PLUGIN_COMPONENT
@@ -1103,35 +1216,57 @@
         Lampa.Listener.follow('full', function(e) {
             if (!e || e.type !== 'complite') return;
             if (!e.data || !e.data.movie || !e.data.movie.id) return;
-            if (!e.object || !e.object.activity) return;
 
             var movie = e.data.movie;
-            var activity = e.object.activity;
-            var renderNode = activity.render();
+            logDebug('Подія full:complite для фільму/серіалу:', movie.id, movie.title || movie.name || '');
 
-            var staleReactions = (renderNode && renderNode.jquery ? renderNode[0] : renderNode);
-            if (staleReactions && staleReactions.querySelectorAll) {
-                var hiddenNodes = staleReactions.querySelectorAll('.full-start__reactions, .full-start-new__reactions');
-                var h;
-                for (h = 0; h < hiddenNodes.length; h++) {
-                    hiddenNodes[h].style.display = 'none';
+            var fallbackData = buildFallbackData(movie);
+            var apiCompleted = false;
+
+            window.setTimeout(function() {
+                var rootEl = resolveRenderRoot(e);
+                logDebug('Перевірка DOM через 150мс, rootEl знайдено:', Boolean(rootEl));
+
+                if (rootEl && !apiCompleted) {
+                    logDebug('Рендер резервних даних (TMDB fallback)');
+                    renderIntoCard(rootEl, movie, fallbackData);
                 }
-            }
 
-            fetchMdblistData(movie).then(function(data) {
-                if (!data) return;
-                var currentRender = activity.render();
-                renderIntoCard(currentRender, movie, data);
-            }).catch(function() {
-                /* silent fail on network error */
-            });
+                fetchMdblistData(movie).then(function(data) {
+                    apiCompleted = true;
+                    var freshRoot = resolveRenderRoot(e) || rootEl;
+                    if (!freshRoot) {
+                        logDebug('Не знайдено rootEl після завершення API запиту');
+                        return;
+                    }
+                    if (data) {
+                        logDebug('Рендер повних даних MDBList');
+                        renderIntoCard(freshRoot, movie, data);
+                    } else {
+                        logDebug('MDBList дані відсутні, залишається fallback рендер');
+                        if (!freshRoot.querySelector('.mdb-reactions-wrapper')) {
+                            renderIntoCard(freshRoot, movie, fallbackData);
+                        }
+                    }
+                }).catch(function(err) {
+                    apiCompleted = true;
+                    logDebug('Помилка під час отримання MDBList даних:', err && err.message ? err.message : err);
+                    var freshRoot = resolveRenderRoot(e) || rootEl;
+                    if (freshRoot && !freshRoot.querySelector('.mdb-reactions-wrapper')) {
+                        renderIntoCard(freshRoot, movie, fallbackData);
+                    }
+                });
+            }, 150);
         });
+
+        logDebug('Слухач подій full підключено');
     }
 
     function initPlugin() {
         if (initialized) return;
         initialized = true;
 
+        logDebug('Ініціалізація плагіна MDBList Реакції та Рейтинги');
         injectStyles();
         registerManifest();
         registerSettings();

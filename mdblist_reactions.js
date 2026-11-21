@@ -108,8 +108,7 @@
     function getApiKeys() {
         return {
             mdblistKey: trimStr(getStorageStr('mdblist_api_key', '')),
-            traktClientId: trimStr(getStorageStr('trakt_client_id', '')),
-            traktClientSecret: trimStr(getStorageStr('trakt_client_secret', ''))
+            traktClientId: trimStr(getStorageStr('trakt_client_id', ''))
         };
     }
 
@@ -441,7 +440,7 @@
         }
 
         var refreshToken = trimStr(getStorageStr(TRAKT_REFRESH_KEY, ''));
-        if (!refreshToken || !keys.traktClientSecret) {
+        if (!refreshToken) {
             callback(accessToken);
             return;
         }
@@ -450,7 +449,6 @@
         xhrTraktRequest('POST', 'https://api.trakt.tv/oauth/token', {
             refresh_token: refreshToken,
             client_id: keys.traktClientId,
-            client_secret: keys.traktClientSecret,
             redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
             grant_type: 'refresh_token'
         }, '', keys.traktClientId, function(status, parsed) {
@@ -478,9 +476,9 @@
 
     function startTraktDeviceAuth() {
         var keys = getApiKeys();
-        if (!keys.traktClientId || !keys.traktClientSecret) {
+        if (!keys.traktClientId) {
             if (window.Lampa && Lampa.Noty) {
-                Lampa.Noty.show('Спочатку введіть Trakt Client ID та Client Secret у полях нижче');
+                Lampa.Noty.show('Спочатку введіть Trakt Client ID у полі нижче');
             }
             return;
         }
@@ -556,8 +554,7 @@
 
                 xhrTraktRequest('POST', 'https://api.trakt.tv/oauth/device/token', {
                     code: deviceCode,
-                    client_id: keys.traktClientId,
-                    client_secret: keys.traktClientSecret
+                    client_id: keys.traktClientId
                 }, '', keys.traktClientId, function(tokStatus, tokData) {
                     if (modalClosed) return;
 
@@ -1906,25 +1903,7 @@
             },
             field: {
                 name: 'Trakt Client ID',
-                description: 'Client ID застосунку з trakt.tv для реакцій та авторизації'
-            },
-            onChange: function() {
-                clearPluginCache(true);
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: PLUGIN_COMPONENT,
-            param: {
-                name: 'trakt_client_secret',
-                type: 'input',
-                values: '',
-                placeholder: 'Вставте ваш Trakt Client Secret',
-                default: ''
-            },
-            field: {
-                name: 'Trakt Client Secret',
-                description: 'Client Secret застосунку з trakt.tv для авторизації через код'
+                description: 'Client ID застосунку (PKCE) з developer.trakt.tv для реакцій та авторизації'
             },
             onChange: function() {
                 clearPluginCache(true);
@@ -2063,7 +2042,7 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.2.1',
+                version: '1.2.2',
                 name: 'Trakt & Рейтинги',
                 description: 'Синхронізація Trakt, живі реакції та рейтинги з 7 платформ',
                 component: PLUGIN_COMPONENT

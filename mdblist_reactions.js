@@ -58,7 +58,7 @@
             emoji: '💩',
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f4a9.png',
             barColor: 'rgba(181, 115, 65, 0.85)',
-            traktScore: 1,
+            traktScore: 2,
             label: 'Слабко',
             order: 4
         }

@@ -1,7 +1,7 @@
 (function() {
     'use strict';
 
-    var MDBLIST_API_KEY = 'utha0wvg7a0g4kwl10yee3t6x';
+    var MDBLIST_API_KEY = '581re7xhn9uqc4v6gjj5p9fz9';
     var CACHE_PREFIX = 'mdblist_v11_';
     var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_', 'mdblist_v10_');
     var VOTE_PREFIX = 'mdblist_user_vote_';

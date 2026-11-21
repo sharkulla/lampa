@@ -1,9 +1,6 @@
 (function() {
     'use strict';
 
-    var TRAKT_APP_ID = 'ВАШ_CLIENT_ID';
-    var TRAKT_APP_SECRET = 'ВАШ_CLIENT_SECRET';
-
     var CACHE_PREFIX = 'mdblist_v13_';
     var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_', 'mdblist_v10_', 'mdblist_v11_', 'mdblist_v12_');
     var VOTE_PREFIX = 'mdblist_user_vote_';
@@ -93,16 +90,6 @@
         return String(str).replace(/^\s+|\s+$/g, '');
     }
 
-    function hasValidTraktCredentials() {
-        var id = trimStr(TRAKT_APP_ID);
-        return Boolean(id && id !== 'ВАШ_CLIENT_ID');
-    }
-
-    function hasValidTraktSecret() {
-        var sec = trimStr(TRAKT_APP_SECRET);
-        return Boolean(sec && sec !== 'ВАШ_CLIENT_SECRET');
-    }
-
     function getStorageBoolTrueDefault(key) {
         if (!window.Lampa || !Lampa.Storage) return true;
         var val = Lampa.Storage.get(key, true);
@@ -121,7 +108,8 @@
     function getApiKeys() {
         return {
             mdblistKey: trimStr(getStorageStr('mdblist_api_key', '')),
-            traktClientId: hasValidTraktCredentials() ? trimStr(TRAKT_APP_ID) : ''
+            traktClientId: trimStr(getStorageStr('trakt_client_id', '')),
+            traktClientSecret: trimStr(getStorageStr('trakt_client_secret', ''))
         };
     }
 
@@ -246,7 +234,7 @@
         clearTraktSyncCache();
         logDebug('Кеш очищено, видалено записів:', removed);
         if (!silent && window.Lampa && Lampa.Noty) {
-            Lampa.Noty.show('Кеш MDBList очищено');
+            Lampa.Noty.show('Кеш рейтингів очищено');
         }
         return removed;
     }
@@ -388,9 +376,10 @@
         };
     }
 
-    function xhrTraktRequest(method, url, bodyObj, accessToken, onResult) {
+    function xhrTraktRequest(method, url, bodyObj, accessToken, traktClientId, onResult) {
         var xhr = new XMLHttpRequest();
         var settled = false;
+        var clientId = traktClientId || getApiKeys().traktClientId;
 
         var finish = function(status, parsed) {
             if (settled) return;
@@ -402,7 +391,7 @@
         xhr.timeout = 12000;
         xhr.setRequestHeader('Content-Type', 'application/json');
         xhr.setRequestHeader('trakt-api-version', '2');
-        xhr.setRequestHeader('trakt-api-key', trimStr(TRAKT_APP_ID));
+        xhr.setRequestHeader('trakt-api-key', clientId);
         if (accessToken) {
             xhr.setRequestHeader('Authorization', 'Bearer ' + accessToken);
         }
@@ -437,7 +426,8 @@
 
     function ensureValidTraktToken(callback) {
         var accessToken = trimStr(getStorageStr(TRAKT_TOKEN_KEY, ''));
-        if (!accessToken || !hasValidTraktCredentials()) {
+        var keys = getApiKeys();
+        if (!accessToken || !keys.traktClientId) {
             callback('');
             return;
         }
@@ -451,7 +441,7 @@
         }
 
         var refreshToken = trimStr(getStorageStr(TRAKT_REFRESH_KEY, ''));
-        if (!refreshToken || !hasValidTraktSecret()) {
+        if (!refreshToken || !keys.traktClientSecret) {
             callback(accessToken);
             return;
         }
@@ -459,11 +449,11 @@
         logDebug('Оновлення токена Trakt через refresh_token...');
         xhrTraktRequest('POST', 'https://api.trakt.tv/oauth/token', {
             refresh_token: refreshToken,
-            client_id: trimStr(TRAKT_APP_ID),
-            client_secret: trimStr(TRAKT_APP_SECRET),
+            client_id: keys.traktClientId,
+            client_secret: keys.traktClientSecret,
             redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
             grant_type: 'refresh_token'
-        }, '', function(status, parsed) {
+        }, '', keys.traktClientId, function(status, parsed) {
             if (status === 200 && parsed && parsed.access_token) {
                 saveTraktTokens(parsed);
                 logDebug('Токен Trakt успішно оновлено');
@@ -487,9 +477,10 @@
     }
 
     function startTraktDeviceAuth() {
-        if (!hasValidTraktCredentials() || !hasValidTraktSecret()) {
+        var keys = getApiKeys();
+        if (!keys.traktClientId || !keys.traktClientSecret) {
             if (window.Lampa && Lampa.Noty) {
-                Lampa.Noty.show('Вкажіть TRAKT_APP_ID та TRAKT_APP_SECRET у коді плагіна');
+                Lampa.Noty.show('Спочатку введіть Trakt Client ID та Client Secret у полях нижче');
             }
             return;
         }
@@ -497,8 +488,8 @@
         stopDevicePolling();
 
         xhrTraktRequest('POST', 'https://api.trakt.tv/oauth/device/code', {
-            client_id: trimStr(TRAKT_APP_ID)
-        }, '', function(status, codeData) {
+            client_id: keys.traktClientId
+        }, '', keys.traktClientId, function(status, codeData) {
             if (status !== 200 || !codeData || !codeData.device_code || !codeData.user_code) {
                 if (window.Lampa && Lampa.Noty) {
                     Lampa.Noty.show('Помилка отримання коду активації Trakt (HTTP ' + status + ')');
@@ -565,9 +556,9 @@
 
                 xhrTraktRequest('POST', 'https://api.trakt.tv/oauth/device/token', {
                     code: deviceCode,
-                    client_id: trimStr(TRAKT_APP_ID),
-                    client_secret: trimStr(TRAKT_APP_SECRET)
-                }, '', function(tokStatus, tokData) {
+                    client_id: keys.traktClientId,
+                    client_secret: keys.traktClientSecret
+                }, '', keys.traktClientId, function(tokStatus, tokData) {
                     if (modalClosed) return;
 
                     if (tokStatus === 200 && tokData && tokData.access_token) {
@@ -673,7 +664,8 @@
     }
 
     function fetchUserTraktRatingForMedia(movie, mdbJson, callback) {
-        if (!isTraktLoggedIn() || !hasValidTraktCredentials()) {
+        var keys = getApiKeys();
+        if (!isTraktLoggedIn() || !keys.traktClientId) {
             callback('');
             return;
         }
@@ -696,7 +688,7 @@
             var syncUrl = 'https://api.trakt.tv/sync/ratings/' + mediaEndpoint;
 
             logDebug('Синхронізація особистих оцінок Trakt:', syncUrl);
-            xhrTraktRequest('GET', syncUrl, null, token, function(status, list) {
+            xhrTraktRequest('GET', syncUrl, null, token, keys.traktClientId, function(status, list) {
                 if (status === 200 && list && typeof list.length === 'number') {
                     var map = {};
                     var i;
@@ -722,6 +714,9 @@
     }
 
     function syncReactionToTrakt(movie, mdbJson, reactionKey) {
+        var keys = getApiKeys();
+        if (!keys.traktClientId) return;
+
         ensureValidTraktToken(function(token) {
             if (!token) return;
 
@@ -743,7 +738,7 @@
                     ids: idsObj
                 };
                 payload[listField] = new Array(itemEntry);
-                xhrTraktRequest('POST', 'https://api.trakt.tv/sync/ratings', payload, token, function(status) {
+                xhrTraktRequest('POST', 'https://api.trakt.tv/sync/ratings', payload, token, keys.traktClientId, function(status) {
                     if (status === 200 || status === 201) {
                         updateLocalTraktSyncMap(isShow, movie, mdbJson, reactionKey);
                         if (window.Lampa && Lampa.Noty) {
@@ -755,7 +750,7 @@
                 });
             } else {
                 payload[listField] = new Array({ ids: idsObj });
-                xhrTraktRequest('POST', 'https://api.trakt.tv/sync/ratings/remove', payload, token, function(status) {
+                xhrTraktRequest('POST', 'https://api.trakt.tv/sync/ratings/remove', payload, token, keys.traktClientId, function(status) {
                     if (status === 200 || status === 204) {
                         updateLocalTraktSyncMap(isShow, movie, mdbJson, '');
                         if (window.Lampa && Lampa.Noty) {
@@ -825,7 +820,7 @@
 
     function fetchTraktRatings(movie, mdbJson, traktClientId, callback) {
         if (!traktClientId) {
-            callback(createEmptyReactions('Вкажіть TRAKT_APP_ID у коді плагіна', false));
+            callback(createEmptyReactions('Вкажіть Trakt Client ID у Налаштуваннях', false));
             return;
         }
 
@@ -860,7 +855,7 @@
                     searchByTmdbId();
                 } else {
                     var hint = (errMsg.indexOf('401') !== -1 || errMsg.indexOf('403') !== -1)
-                        ? 'Невірний TRAKT_APP_ID (' + errMsg + ')'
+                        ? 'Невірний Trakt Client ID (' + errMsg + ')'
                         : 'Не вдалося завантажити оцінки Trakt (' + errMsg + ')';
                     callback(createEmptyReactions(hint, false));
                 }
@@ -884,7 +879,7 @@
                 callback(createEmptyReactions('Фільм не знайдено на Trakt', false));
             }, function(errMsg) {
                 var hint = (errMsg.indexOf('401') !== -1 || errMsg.indexOf('403') !== -1)
-                    ? 'Невірний TRAKT_APP_ID (' + errMsg + ')'
+                    ? 'Невірний Trakt Client ID (' + errMsg + ')'
                     : 'Помилка пошуку Trakt (' + errMsg + ')';
                 callback(createEmptyReactions(hint, false));
             });
@@ -1871,26 +1866,8 @@
 
         Lampa.SettingsApi.addComponent({
             component: PLUGIN_COMPONENT,
-            name: 'MDBList Реакції',
+            name: 'Trakt & Рейтинги',
             icon: sidebarIcon
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: PLUGIN_COMPONENT,
-            param: {
-                name: 'mdblist_api_key',
-                type: 'input',
-                values: '',
-                placeholder: 'Вставте ваш MDBList API Key',
-                default: ''
-            },
-            field: {
-                name: 'MDBList API Key',
-                description: 'Ключ API з сайту mdblist.com для відображення рейтингів 7 платформ'
-            },
-            onChange: function() {
-                clearPluginCache(true);
-            }
         });
 
         Lampa.SettingsApi.addParam({
@@ -1915,6 +1892,60 @@
                 } else {
                     startTraktDeviceAuth();
                 }
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
+                name: 'trakt_client_id',
+                type: 'input',
+                values: '',
+                placeholder: 'Вставте ваш Trakt Client ID',
+                default: ''
+            },
+            field: {
+                name: 'Trakt Client ID',
+                description: 'Client ID застосунку з trakt.tv для реакцій та авторизації'
+            },
+            onChange: function() {
+                clearPluginCache(true);
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
+                name: 'trakt_client_secret',
+                type: 'input',
+                values: '',
+                placeholder: 'Вставте ваш Trakt Client Secret',
+                default: ''
+            },
+            field: {
+                name: 'Trakt Client Secret',
+                description: 'Client Secret застосунку з trakt.tv для авторизації через код'
+            },
+            onChange: function() {
+                clearPluginCache(true);
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
+                name: 'mdblist_api_key',
+                type: 'input',
+                values: '',
+                placeholder: 'Вставте ваш MDBList API Key',
+                default: ''
+            },
+            field: {
+                name: 'MDBList API Key',
+                description: 'Ключ API з сайту mdblist.com для відображення рейтингів 7 платформ'
+            },
+            onChange: function() {
+                clearPluginCache(true);
             }
         });
 
@@ -2018,7 +2049,7 @@
                 type: 'button'
             },
             field: {
-                name: 'Очистити кеш MDBList',
+                name: 'Очистити кеш рейтингів',
                 description: 'Видалити збережені рейтинги та реакції для повторного завантаження'
             },
             onChange: function() {
@@ -2032,9 +2063,9 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.2.0',
-                name: 'MDBList Реакції та Рейтинги',
-                description: 'Двостороння синхронізація оцінок Trakt OAuth та панель рейтингів з 7 платформ через MDBList API',
+                version: '1.2.1',
+                name: 'Trakt & Рейтинги',
+                description: 'Синхронізація Trakt, живі реакції та рейтинги з 7 платформ',
                 component: PLUGIN_COMPONENT
             });
         }
@@ -2092,7 +2123,7 @@
                     ratings: new Array(),
                     reactions: keys.traktClientId
                         ? createEmptyReactions('Завантаження оцінок Trakt...', true)
-                        : createEmptyReactions('Вкажіть TRAKT_APP_ID у коді плагіна', false),
+                        : createEmptyReactions('Вкажіть Trakt Client ID у Налаштуваннях', false),
                     mdbJson: null,
                     apiError: keys.mdblistKey ? '' : 'NO_KEY',
                     ratingsLoading: Boolean(keys.mdblistKey),
@@ -2164,7 +2195,7 @@
         if (initialized) return;
         initialized = true;
 
-        logDebug('Ініціалізація плагіна MDBList Реакції та Рейтинги');
+        logDebug('Ініціалізація плагіна Trakt & Рейтинги');
         injectStyles();
         registerManifest();
         registerSettings();

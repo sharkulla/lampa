@@ -10,11 +10,46 @@
     var initialized = false;
 
     var REACTION_DEFS = new Array(
-        { key: 'masterpiece', emoji: '🔥', label: 'Шедевр', order: 0 },
-        { key: 'worth', emoji: '👍', label: 'Варто глянути', order: 1 },
-        { key: 'once', emoji: '🤔', label: 'На один раз', order: 2 },
-        { key: 'boring', emoji: '😴', label: 'Нудно', order: 3 },
-        { key: 'weak', emoji: '💩', label: 'Слабко', order: 4 }
+        {
+            key: 'masterpiece',
+            emoji: '🔥',
+            png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f525.png',
+            barColor: 'rgba(255, 94, 20, 0.85)',
+            label: 'Шедевр',
+            order: 0
+        },
+        {
+            key: 'worth',
+            emoji: '👍',
+            png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f44d.png',
+            barColor: 'rgba(255, 204, 0, 0.85)',
+            label: 'Варто глянути',
+            order: 1
+        },
+        {
+            key: 'once',
+            emoji: '🤔',
+            png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f914.png',
+            barColor: 'rgba(255, 193, 7, 0.78)',
+            label: 'На один раз',
+            order: 2
+        },
+        {
+            key: 'boring',
+            emoji: '😴',
+            png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f634.png',
+            barColor: 'rgba(100, 149, 237, 0.85)',
+            label: 'Нудно',
+            order: 3
+        },
+        {
+            key: 'weak',
+            emoji: '💩',
+            png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f4a9.png',
+            barColor: 'rgba(181, 115, 65, 0.85)',
+            label: 'Слабко',
+            order: 4
+        }
     );
 
     var PLATFORM_ORDER = new Array(
@@ -70,6 +105,10 @@
             pillStyle: getStorageStr('mdb_pill_style', 'glass'),
             badgeStyle: getStorageStr('mdb_badge_style', 'original'),
             scale: getStorageStr('mdb_scale', '1.0'),
+            usePngEmojis: getStorageBoolTrueDefault('mdb_use_png_emojis'),
+            emojiGlow: getStorageBoolTrueDefault('mdb_emoji_glow'),
+            emojiAnim: getStorageBoolTrueDefault('mdb_emoji_anim'),
+            emojiBar: getStorageBoolTrueDefault('mdb_emoji_bar'),
             showPills: getStorageBoolTrueDefault('mdb_show_pills'),
             showImdb: getStorageBoolTrueDefault('mdb_show_imdb'),
             showTrakt: getStorageBoolTrueDefault('mdb_show_trakt'),
@@ -697,6 +736,8 @@
             list.push({
                 key: def.key,
                 emoji: def.emoji,
+                png: def.png,
+                barColor: def.barColor,
                 label: def.label,
                 order: def.order,
                 count: baseCount + (isSelected ? 1 : 0),
@@ -744,7 +785,7 @@
             '  position: relative;' +
             '  display: inline-flex;' +
             '  align-items: center;' +
-            '  gap: 0.45em;' +
+            '  gap: 0.48em;' +
             '  padding: 0.42em 0.95em;' +
             '  border-radius: 999px;' +
             '  cursor: pointer;' +
@@ -788,13 +829,69 @@
             '  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);' +
             '}' +
 
-            '.mdb-pill-emoji {' +
-            '  font-size: 1.18em;' +
+            '.mdb-pill-icon {' +
+            '  display: inline-flex;' +
+            '  align-items: center;' +
+            '  justify-content: center;' +
             '  line-height: 1;' +
             '}' +
+            '.mdb-pill-emoji-img {' +
+            '  width: 1.38em;' +
+            '  height: 1.38em;' +
+            '  object-fit: contain;' +
+            '  display: block;' +
+            '}' +
+            '.mdb-pill-emoji-unicode {' +
+            '  font-size: 1.22em;' +
+            '  line-height: 1;' +
+            '}' +
+
+            '.mdb-emoji-anim .mdb-pill-icon {' +
+            '  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);' +
+            '}' +
+            '.mdb-emoji-anim .mdb-pill.focus .mdb-pill-icon, .mdb-emoji-anim .mdb-pill:hover .mdb-pill-icon {' +
+            '  transform: scale(1.22) rotate(-6deg);' +
+            '}' +
+
+            '.mdb-emoji-glow .mdb-pill[data-reaction-key="masterpiece"] .mdb-pill-icon {' +
+            '  filter: drop-shadow(0 0 6px rgba(255, 94, 20, 0.65));' +
+            '}' +
+            '.mdb-emoji-glow .mdb-pill[data-reaction-key="worth"] .mdb-pill-icon {' +
+            '  filter: drop-shadow(0 0 6px rgba(255, 204, 0, 0.55));' +
+            '}' +
+            '.mdb-emoji-glow .mdb-pill[data-reaction-key="once"] .mdb-pill-icon {' +
+            '  filter: drop-shadow(0 0 6px rgba(255, 193, 7, 0.45));' +
+            '}' +
+            '.mdb-emoji-glow .mdb-pill[data-reaction-key="boring"] .mdb-pill-icon {' +
+            '  filter: drop-shadow(0 0 6px rgba(100, 149, 237, 0.55));' +
+            '}' +
+            '.mdb-emoji-glow .mdb-pill[data-reaction-key="weak"] .mdb-pill-icon {' +
+            '  filter: drop-shadow(0 0 6px rgba(181, 115, 65, 0.55));' +
+            '}' +
+
             '.mdb-pill-count {' +
+            '  position: relative;' +
+            '  z-index: 1;' +
             '  font-variant-numeric: tabular-nums;' +
             '  letter-spacing: 0.01em;' +
+            '}' +
+
+            '.mdb-pill-bar-track {' +
+            '  position: absolute;' +
+            '  left: 0;' +
+            '  right: 0;' +
+            '  top: 0;' +
+            '  bottom: 0;' +
+            '  border-radius: 999px;' +
+            '  overflow: hidden;' +
+            '  pointer-events: none;' +
+            '}' +
+            '.mdb-pill-bar-fill {' +
+            '  position: absolute;' +
+            '  left: 0;' +
+            '  bottom: 0;' +
+            '  height: 2px;' +
+            '  transition: width 0.3s ease;' +
             '}' +
 
             '.mdb-pill-tooltip {' +
@@ -934,7 +1031,9 @@
         if (settings.scale === '1.15') scaleClass = 'mdb-scale-115';
 
         wrapper.className = 'mdb-reactions-wrapper mdb-style-' + settings.pillStyle +
-            ' mdb-badges-' + settings.badgeStyle + ' ' + scaleClass;
+            ' mdb-badges-' + settings.badgeStyle + ' ' + scaleClass +
+            (settings.emojiGlow ? ' mdb-emoji-glow' : '') +
+            (settings.emojiAnim ? ' mdb-emoji-anim' : '');
 
         if (settings.showPills && data.reactions) {
             var pillsRow = document.createElement('div');
@@ -949,29 +1048,68 @@
                 var currentVote = getUserVote(mediaVoteKey);
                 var sortedPills = buildSortedPillsList(data.reactions, currentVote);
                 var hintSuffix = data.reactions.hintText ? (' (' + data.reactions.hintText + ')') : '';
+                var totalVotes = 0;
                 var i;
+
+                for (i = 0; i < sortedPills.length; i++) {
+                    totalVotes += sortedPills[i].count;
+                }
 
                 for (i = 0; i < sortedPills.length; i++) {
                     (function(item) {
                         var pill = document.createElement('div');
-                        pill.className = 'mdb-pill selector' + (item.isSelected ? ' active' : '');
+                        pill.className = 'mdb-pill lampa-pill-btn selector' + (item.isSelected ? ' active' : '');
                         pill.setAttribute('data-reaction-key', item.key);
 
                         var tooltip = document.createElement('span');
                         tooltip.className = 'mdb-pill-tooltip';
                         tooltip.textContent = item.label + hintSuffix;
 
-                        var emojiEl = document.createElement('span');
-                        emojiEl.className = 'mdb-pill-emoji';
-                        emojiEl.textContent = item.emoji;
+                        var iconWrap = document.createElement('span');
+                        iconWrap.className = 'mdb-pill-icon';
+
+                        if (settings.usePngEmojis && item.png) {
+                            var imgEl = document.createElement('img');
+                            imgEl.className = 'mdb-pill-emoji-img';
+                            imgEl.src = item.png;
+                            imgEl.alt = item.emoji;
+                            imgEl.onerror = function() {
+                                if (imgEl.parentNode) {
+                                    var fallbackSpan = document.createElement('span');
+                                    fallbackSpan.className = 'mdb-pill-emoji-unicode';
+                                    fallbackSpan.textContent = item.emoji;
+                                    imgEl.parentNode.replaceChild(fallbackSpan, imgEl);
+                                }
+                            };
+                            iconWrap.appendChild(imgEl);
+                        } else {
+                            var unicodeSpan = document.createElement('span');
+                            unicodeSpan.className = 'mdb-pill-emoji-unicode';
+                            unicodeSpan.textContent = item.emoji;
+                            iconWrap.appendChild(unicodeSpan);
+                        }
 
                         var countEl = document.createElement('span');
                         countEl.className = 'mdb-pill-count';
                         countEl.textContent = formatPillCount(item.count);
 
                         pill.appendChild(tooltip);
-                        pill.appendChild(emojiEl);
+                        pill.appendChild(iconWrap);
                         pill.appendChild(countEl);
+
+                        if (settings.emojiBar) {
+                            var pct = totalVotes > 0 ? Math.round((item.count / totalVotes) * 100) : 0;
+                            var barTrack = document.createElement('span');
+                            barTrack.className = 'mdb-pill-bar-track';
+
+                            var barFill = document.createElement('span');
+                            barFill.className = 'mdb-pill-bar-fill';
+                            barFill.style.width = pct + '%';
+                            barFill.style.backgroundColor = item.barColor;
+
+                            barTrack.appendChild(barFill);
+                            pill.appendChild(barTrack);
+                        }
 
                         var handleToggle = function(ev) {
                             if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
@@ -1299,6 +1437,10 @@
         });
 
         var toggles = new Array(
+            { key: 'mdb_use_png_emojis', title: 'Глянцеві 3D-іконки емодзі' },
+            { key: 'mdb_emoji_glow', title: 'Кольорове світіння емодзі' },
+            { key: 'mdb_emoji_anim', title: 'Анімація емодзі при наведенні' },
+            { key: 'mdb_emoji_bar', title: 'Смужка відсотків у капсулах' },
             { key: 'mdb_show_pills', title: 'Показувати реакції (5 емодзі)' },
             { key: 'mdb_show_imdb', title: 'Показувати IMDb' },
             { key: 'mdb_show_trakt', title: 'Показувати Trakt' },
@@ -1345,7 +1487,7 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.1.1',
+                version: '1.1.2',
                 name: 'MDBList Реакції та Рейтинги',
                 description: 'Реакції за оцінками Trakt API v2 та панель рейтингів з 7 платформ через MDBList API',
                 component: PLUGIN_COMPONENT

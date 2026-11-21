@@ -1,13 +1,23 @@
 (function() {
     'use strict';
 
+    var TRAKT_APP_ID = 'ВАШ_CLIENT_ID';
+    var TRAKT_APP_SECRET = 'ВАШ_CLIENT_SECRET';
+
     var CACHE_PREFIX = 'mdblist_v13_';
     var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_', 'mdblist_v10_', 'mdblist_v11_', 'mdblist_v12_');
     var VOTE_PREFIX = 'mdblist_user_vote_';
+    var TRAKT_TOKEN_KEY = 'trakt_access_token';
+    var TRAKT_REFRESH_KEY = 'trakt_refresh_token';
+    var TRAKT_EXPIRES_KEY = 'trakt_token_expires';
+    var TRAKT_SYNC_CACHE_MOVIES = 'trakt_sync_ratings_movies_v1';
+    var TRAKT_SYNC_CACHE_SHOWS = 'trakt_sync_ratings_shows_v1';
+    var TRAKT_SYNC_TTL_MS = 15 * 60 * 1000;
     var CACHE_TTL_MINUTES = 1440;
     var STYLE_ID = 'mdblist-reactions-plugin-styles';
     var PLUGIN_COMPONENT = 'mdblist_reactions';
     var initialized = false;
+    var activePollTimer = null;
 
     var REACTION_DEFS = new Array(
         {
@@ -15,6 +25,7 @@
             emoji: '🔥',
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f525.png',
             barColor: 'rgba(255, 94, 20, 0.85)',
+            traktScore: 10,
             label: 'Шедевр',
             order: 0
         },
@@ -23,6 +34,7 @@
             emoji: '👍',
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f44d.png',
             barColor: 'rgba(255, 204, 0, 0.85)',
+            traktScore: 8,
             label: 'Варто глянути',
             order: 1
         },
@@ -31,6 +43,7 @@
             emoji: '🤔',
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f914.png',
             barColor: 'rgba(255, 193, 7, 0.78)',
+            traktScore: 6,
             label: 'На один раз',
             order: 2
         },
@@ -39,6 +52,7 @@
             emoji: '😴',
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f634.png',
             barColor: 'rgba(100, 149, 237, 0.85)',
+            traktScore: 4,
             label: 'Нудно',
             order: 3
         },
@@ -47,6 +61,7 @@
             emoji: '💩',
             png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f4a9.png',
             barColor: 'rgba(181, 115, 65, 0.85)',
+            traktScore: 2,
             label: 'Слабко',
             order: 4
         }
@@ -78,6 +93,16 @@
         return String(str).replace(/^\s+|\s+$/g, '');
     }
 
+    function hasValidTraktCredentials() {
+        var id = trimStr(TRAKT_APP_ID);
+        return Boolean(id && id !== 'ВАШ_CLIENT_ID');
+    }
+
+    function hasValidTraktSecret() {
+        var sec = trimStr(TRAKT_APP_SECRET);
+        return Boolean(sec && sec !== 'ВАШ_CLIENT_SECRET');
+    }
+
     function getStorageBoolTrueDefault(key) {
         if (!window.Lampa || !Lampa.Storage) return true;
         var val = Lampa.Storage.get(key, true);
@@ -96,7 +121,7 @@
     function getApiKeys() {
         return {
             mdblistKey: trimStr(getStorageStr('mdblist_api_key', '')),
-            traktClientId: trimStr(getStorageStr('trakt_client_id', ''))
+            traktClientId: hasValidTraktCredentials() ? trimStr(TRAKT_APP_ID) : ''
         };
     }
 
@@ -185,6 +210,16 @@
         return false;
     }
 
+    function clearTraktSyncCache() {
+        if (!window.Lampa || !Lampa.Storage) return;
+        try {
+            Lampa.Storage.remove(TRAKT_SYNC_CACHE_MOVIES);
+            Lampa.Storage.remove(TRAKT_SYNC_CACHE_SHOWS);
+        } catch (err) {
+            /* ignore */
+        }
+    }
+
     function clearPluginCache(silent) {
         var removed = 0;
         try {
@@ -208,11 +243,49 @@
         } catch (err) {
             /* ignore */
         }
+        clearTraktSyncCache();
         logDebug('Кеш очищено, видалено записів:', removed);
         if (!silent && window.Lampa && Lampa.Noty) {
             Lampa.Noty.show('Кеш MDBList очищено');
         }
         return removed;
+    }
+
+    function isTraktLoggedIn() {
+        return Boolean(trimStr(getStorageStr(TRAKT_TOKEN_KEY, '')));
+    }
+
+    function clearTraktTokens() {
+        if (!window.Lampa || !Lampa.Storage) return;
+        Lampa.Storage.remove(TRAKT_TOKEN_KEY);
+        Lampa.Storage.remove(TRAKT_REFRESH_KEY);
+        Lampa.Storage.remove(TRAKT_EXPIRES_KEY);
+        clearTraktSyncCache();
+    }
+
+    function saveTraktTokens(tokenData) {
+        if (!window.Lampa || !Lampa.Storage || !tokenData) return;
+        var createdMs = tokenData.created_at ? (Number(tokenData.created_at) * 1000) : new Date().getTime();
+        var expiresMs = createdMs + ((Number(tokenData.expires_in) || 7776000) * 1000);
+        Lampa.Storage.set(TRAKT_TOKEN_KEY, String(tokenData.access_token || ''));
+        if (tokenData.refresh_token) {
+            Lampa.Storage.set(TRAKT_REFRESH_KEY, String(tokenData.refresh_token));
+        }
+        Lampa.Storage.set(TRAKT_EXPIRES_KEY, String(expiresMs));
+    }
+
+    function updateAuthButtonText() {
+        var btnText = isTraktLoggedIn()
+            ? 'Вийти з Trakt (Підключено)'
+            : 'Увійти в акаунт Trakt (Код активації)';
+        try {
+            var el = document.querySelector('[data-name="trakt_auth_btn"] .settings-param__name');
+            if (el) {
+                el.textContent = btnText;
+            }
+        } catch (err) {
+            /* ignore */
+        }
     }
 
     function formatVotePlural(count) {
@@ -255,6 +328,26 @@
         return s;
     }
 
+    function ratingValueToReactionKey(val) {
+        var num = Number(val) || 0;
+        if (num >= 9) return 'masterpiece';
+        if (num >= 7) return 'worth';
+        if (num >= 5) return 'once';
+        if (num >= 3) return 'boring';
+        if (num >= 1) return 'weak';
+        return '';
+    }
+
+    function reactionKeyToTraktScore(reactionKey) {
+        var i;
+        for (i = 0; i < REACTION_DEFS.length; i++) {
+            if (REACTION_DEFS[i].key === reactionKey) {
+                return REACTION_DEFS[i].traktScore;
+            }
+        }
+        return 0;
+    }
+
     function createEmptyReactions(hintText, isPending) {
         return {
             masterpiece: 0,
@@ -293,6 +386,387 @@
             isPending: false,
             hintText: ''
         };
+    }
+
+    function xhrTraktRequest(method, url, bodyObj, accessToken, onResult) {
+        var xhr = new XMLHttpRequest();
+        var settled = false;
+
+        var finish = function(status, parsed) {
+            if (settled) return;
+            settled = true;
+            onResult(status, parsed);
+        };
+
+        xhr.open(method, url, true);
+        xhr.timeout = 12000;
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('trakt-api-version', '2');
+        xhr.setRequestHeader('trakt-api-key', trimStr(TRAKT_APP_ID));
+        if (accessToken) {
+            xhr.setRequestHeader('Authorization', 'Bearer ' + accessToken);
+        }
+
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState !== 4) return;
+            var parsed = null;
+            if (xhr.responseText) {
+                try {
+                    parsed = JSON.parse(xhr.responseText);
+                } catch (err) {
+                    parsed = null;
+                }
+            }
+            finish(xhr.status, parsed);
+        };
+
+        xhr.ontimeout = function() {
+            finish(0, null);
+        };
+
+        xhr.onerror = function() {
+            finish(xhr.status || 0, null);
+        };
+
+        try {
+            xhr.send(bodyObj ? JSON.stringify(bodyObj) : null);
+        } catch (sendErr) {
+            finish(0, null);
+        }
+    }
+
+    function ensureValidTraktToken(callback) {
+        var accessToken = trimStr(getStorageStr(TRAKT_TOKEN_KEY, ''));
+        if (!accessToken || !hasValidTraktCredentials()) {
+            callback('');
+            return;
+        }
+
+        var expiresAt = Number(getStorageStr(TRAKT_EXPIRES_KEY, '0')) || 0;
+        var now = new Date().getTime();
+
+        if (expiresAt > 0 && now < (expiresAt - 60000)) {
+            callback(accessToken);
+            return;
+        }
+
+        var refreshToken = trimStr(getStorageStr(TRAKT_REFRESH_KEY, ''));
+        if (!refreshToken || !hasValidTraktSecret()) {
+            callback(accessToken);
+            return;
+        }
+
+        logDebug('Оновлення токена Trakt через refresh_token...');
+        xhrTraktRequest('POST', 'https://api.trakt.tv/oauth/token', {
+            refresh_token: refreshToken,
+            client_id: trimStr(TRAKT_APP_ID),
+            client_secret: trimStr(TRAKT_APP_SECRET),
+            redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
+            grant_type: 'refresh_token'
+        }, '', function(status, parsed) {
+            if (status === 200 && parsed && parsed.access_token) {
+                saveTraktTokens(parsed);
+                logDebug('Токен Trakt успішно оновлено');
+                callback(String(parsed.access_token));
+            } else if (status === 400 || status === 401) {
+                logDebug('Токен оновлення Trakt недійсний, вихід з акаунта');
+                clearTraktTokens();
+                updateAuthButtonText();
+                callback('');
+            } else {
+                callback(accessToken);
+            }
+        });
+    }
+
+    function stopDevicePolling() {
+        if (activePollTimer) {
+            window.clearTimeout(activePollTimer);
+            activePollTimer = null;
+        }
+    }
+
+    function startTraktDeviceAuth() {
+        if (!hasValidTraktCredentials() || !hasValidTraktSecret()) {
+            if (window.Lampa && Lampa.Noty) {
+                Lampa.Noty.show('Вкажіть TRAKT_APP_ID та TRAKT_APP_SECRET у коді плагіна');
+            }
+            return;
+        }
+
+        stopDevicePolling();
+
+        xhrTraktRequest('POST', 'https://api.trakt.tv/oauth/device/code', {
+            client_id: trimStr(TRAKT_APP_ID)
+        }, '', function(status, codeData) {
+            if (status !== 200 || !codeData || !codeData.device_code || !codeData.user_code) {
+                if (window.Lampa && Lampa.Noty) {
+                    Lampa.Noty.show('Помилка отримання коду активації Trakt (HTTP ' + status + ')');
+                }
+                return;
+            }
+
+            var verifyUrl = codeData.verification_url || 'https://trakt.tv/activate';
+            var userCode = String(codeData.user_code);
+            var deviceCode = String(codeData.device_code);
+            var pollIntervalMs = (Number(codeData.interval) || 5) * 1000;
+            var expiresAtMs = new Date().getTime() + ((Number(codeData.expires_in) || 600) * 1000);
+            var modalClosed = false;
+
+            var modalEl = document.createElement('div');
+            modalEl.className = 'mdb-trakt-auth-modal';
+            modalEl.innerHTML = '' +
+                '<div class="mdb-auth-desc">Відкрийте у браузері на телефоні або комп’ютері:</div>' +
+                '<div class="mdb-auth-url">' + verifyUrl + '</div>' +
+                '<div class="mdb-auth-desc">Та введіть цей код активації:</div>' +
+                '<div class="mdb-auth-code">' + userCode + '</div>' +
+                '<div class="mdb-auth-status">Очікування підтвердження в Trakt...</div>';
+
+            var statusNode = modalEl.querySelector('.mdb-auth-status');
+
+            var closeAuthModal = function() {
+                modalClosed = true;
+                stopDevicePolling();
+                if (window.Lampa && Lampa.Modal) {
+                    Lampa.Modal.close();
+                }
+                if (window.Lampa && Lampa.Controller) {
+                    try {
+                        Lampa.Controller.toggle('settings_component');
+                    } catch (eCtrl) {
+                        /* ignore */
+                    }
+                }
+            };
+
+            if (window.Lampa && Lampa.Modal) {
+                Lampa.Modal.open({
+                    title: 'Підключення акаунта Trakt',
+                    html: window.$ ? window.$(modalEl) : modalEl,
+                    size: 'medium',
+                    onBack: function() {
+                        closeAuthModal();
+                    }
+                });
+            }
+
+            var schedulePoll = function(delayMs) {
+                if (modalClosed) return;
+                activePollTimer = window.setTimeout(pollToken, delayMs);
+            };
+
+            var pollToken = function() {
+                if (modalClosed) return;
+                if (new Date().getTime() >= expiresAtMs) {
+                    if (statusNode) statusNode.textContent = 'Час дії коду вичерпано. Спробуйте ще раз.';
+                    window.setTimeout(closeAuthModal, 2000);
+                    return;
+                }
+
+                xhrTraktRequest('POST', 'https://api.trakt.tv/oauth/device/token', {
+                    code: deviceCode,
+                    client_id: trimStr(TRAKT_APP_ID),
+                    client_secret: trimStr(TRAKT_APP_SECRET)
+                }, '', function(tokStatus, tokData) {
+                    if (modalClosed) return;
+
+                    if (tokStatus === 200 && tokData && tokData.access_token) {
+                        saveTraktTokens(tokData);
+                        clearTraktSyncCache();
+                        updateAuthButtonText();
+                        closeAuthModal();
+                        if (window.Lampa && Lampa.Noty) {
+                            Lampa.Noty.show('Успішно підключено до Trakt!');
+                        }
+                        return;
+                    }
+
+                    if (tokStatus === 400) {
+                        schedulePoll(pollIntervalMs);
+                        return;
+                    }
+
+                    if (tokStatus === 429) {
+                        pollIntervalMs += 2000;
+                        schedulePoll(pollIntervalMs);
+                        return;
+                    }
+
+                    if (tokStatus === 418) {
+                        if (statusNode) statusNode.textContent = 'Авторизацію відхилено користувачем.';
+                        window.setTimeout(closeAuthModal, 1800);
+                        return;
+                    }
+
+                    if (tokStatus === 409 || tokStatus === 410 || tokStatus === 404) {
+                        if (statusNode) statusNode.textContent = 'Код активації недійсний або протермінований.';
+                        window.setTimeout(closeAuthModal, 1800);
+                        return;
+                    }
+
+                    schedulePoll(pollIntervalMs);
+                });
+            };
+
+            schedulePoll(pollIntervalMs);
+        });
+    }
+
+    function readTraktSyncMap(isShow) {
+        var key = isShow ? TRAKT_SYNC_CACHE_SHOWS : TRAKT_SYNC_CACHE_MOVIES;
+        try {
+            if (!window.Lampa || !Lampa.Storage) return null;
+            var raw = Lampa.Storage.get(key, null);
+            if (!raw || !raw._ts || !raw.map) return null;
+            if ((new Date().getTime() - Number(raw._ts)) < TRAKT_SYNC_TTL_MS) {
+                return raw.map;
+            }
+            return null;
+        } catch (err) {
+            return null;
+        }
+    }
+
+    function writeTraktSyncMap(isShow, map) {
+        var key = isShow ? TRAKT_SYNC_CACHE_SHOWS : TRAKT_SYNC_CACHE_MOVIES;
+        try {
+            if (!window.Lampa || !Lampa.Storage) return;
+            Lampa.Storage.set(key, {
+                _ts: new Date().getTime(),
+                map: map
+            });
+        } catch (err) {
+            /* ignore */
+        }
+    }
+
+    function updateLocalTraktSyncMap(isShow, movie, mdbJson, reactionKey) {
+        var map = readTraktSyncMap(isShow);
+        if (!map) map = {};
+
+        var score = reactionKey ? reactionKeyToTraktScore(reactionKey) : 0;
+        var tmdbKey = 'tmdb_' + movie.id;
+        var imdbId = (mdbJson && mdbJson.ids && mdbJson.ids.imdb) || movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
+        var traktId = (mdbJson && mdbJson.ids && mdbJson.ids.trakt) ? String(mdbJson.ids.trakt) : '';
+
+        if (score > 0) {
+            map[tmdbKey] = score;
+            if (imdbId) map['imdb_' + imdbId] = score;
+            if (traktId) map['trakt_' + traktId] = score;
+        } else {
+            delete map[tmdbKey];
+            if (imdbId) delete map['imdb_' + imdbId];
+            if (traktId) delete map['trakt_' + traktId];
+        }
+
+        writeTraktSyncMap(isShow, map);
+    }
+
+    function lookupUserRatingInMap(map, movie, mdbJson) {
+        if (!map) return 0;
+        if (map['tmdb_' + movie.id]) return Number(map['tmdb_' + movie.id]);
+        var traktId = (mdbJson && mdbJson.ids && mdbJson.ids.trakt) ? String(mdbJson.ids.trakt) : '';
+        if (traktId && map['trakt_' + traktId]) return Number(map['trakt_' + traktId]);
+        var imdbId = (mdbJson && mdbJson.ids && mdbJson.ids.imdb) || movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
+        if (imdbId && map['imdb_' + imdbId]) return Number(map['imdb_' + imdbId]);
+        return 0;
+    }
+
+    function fetchUserTraktRatingForMedia(movie, mdbJson, callback) {
+        if (!isTraktLoggedIn() || !hasValidTraktCredentials()) {
+            callback('');
+            return;
+        }
+
+        var isShow = Boolean(movie.first_air_date);
+        var cachedMap = readTraktSyncMap(isShow);
+        if (cachedMap) {
+            var cachedScore = lookupUserRatingInMap(cachedMap, movie, mdbJson);
+            callback(ratingValueToReactionKey(cachedScore));
+            return;
+        }
+
+        ensureValidTraktToken(function(token) {
+            if (!token) {
+                callback('');
+                return;
+            }
+            var mediaEndpoint = isShow ? 'shows' : 'movies';
+            var itemKey = isShow ? 'show' : 'movie';
+            var syncUrl = 'https://api.trakt.tv/sync/ratings/' + mediaEndpoint;
+
+            logDebug('Синхронізація особистих оцінок Trakt:', syncUrl);
+            xhrTraktRequest('GET', syncUrl, null, token, function(status, list) {
+                if (status === 200 && list && typeof list.length === 'number') {
+                    var map = {};
+                    var i;
+                    for (i = 0; i < list.length; i++) {
+                        var entry = list[i];
+                        var obj = entry ? entry[itemKey] : null;
+                        var ids = obj ? obj.ids : null;
+                        var ratingVal = Number(entry && entry.rating) || 0;
+                        if (ids && ratingVal > 0) {
+                            if (ids.tmdb) map['tmdb_' + ids.tmdb] = ratingVal;
+                            if (ids.imdb) map['imdb_' + ids.imdb] = ratingVal;
+                            if (ids.trakt) map['trakt_' + ids.trakt] = ratingVal;
+                        }
+                    }
+                    writeTraktSyncMap(isShow, map);
+                    var foundScore = lookupUserRatingInMap(map, movie, mdbJson);
+                    callback(ratingValueToReactionKey(foundScore));
+                } else {
+                    callback('');
+                }
+            });
+        });
+    }
+
+    function syncReactionToTrakt(movie, mdbJson, reactionKey) {
+        ensureValidTraktToken(function(token) {
+            if (!token) return;
+
+            var isShow = Boolean(movie.first_air_date);
+            var listField = isShow ? 'shows' : 'movies';
+            var idsObj = { tmdb: Number(movie.id) };
+            if (mdbJson && mdbJson.ids && mdbJson.ids.trakt) {
+                idsObj.trakt = Number(mdbJson.ids.trakt);
+            }
+            var imdbId = (mdbJson && mdbJson.ids && mdbJson.ids.imdb) || movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
+            if (imdbId) {
+                idsObj.imdb = String(imdbId);
+            }
+
+            var payload = {};
+            if (reactionKey) {
+                var itemEntry = {
+                    rating: reactionKeyToTraktScore(reactionKey),
+                    ids: idsObj
+                };
+                payload[listField] = new Array(itemEntry);
+                xhrTraktRequest('POST', 'https://api.trakt.tv/sync/ratings', payload, token, function(status) {
+                    if (status === 200 || status === 201) {
+                        updateLocalTraktSyncMap(isShow, movie, mdbJson, reactionKey);
+                        if (window.Lampa && Lampa.Noty) {
+                            Lampa.Noty.show('Оцінку збережено в Trakt');
+                        }
+                    } else if (window.Lampa && Lampa.Noty) {
+                        Lampa.Noty.show('Не вдалося зберегти оцінку в Trakt (HTTP ' + status + ')');
+                    }
+                });
+            } else {
+                payload[listField] = new Array({ ids: idsObj });
+                xhrTraktRequest('POST', 'https://api.trakt.tv/sync/ratings/remove', payload, token, function(status) {
+                    if (status === 200 || status === 204) {
+                        updateLocalTraktSyncMap(isShow, movie, mdbJson, '');
+                        if (window.Lampa && Lampa.Noty) {
+                            Lampa.Noty.show('Оцінку видалено з Trakt');
+                        }
+                    } else if (window.Lampa && Lampa.Noty) {
+                        Lampa.Noty.show('Не вдалося видалити оцінку з Trakt (HTTP ' + status + ')');
+                    }
+                });
+            }
+        });
     }
 
     function xhrTraktGet(url, traktClientId, onSuccess, onError) {
@@ -351,7 +825,7 @@
 
     function fetchTraktRatings(movie, mdbJson, traktClientId, callback) {
         if (!traktClientId) {
-            callback(createEmptyReactions('Вкажіть Trakt Client ID у Налаштуваннях', false));
+            callback(createEmptyReactions('Вкажіть TRAKT_APP_ID у коді плагіна', false));
             return;
         }
 
@@ -386,7 +860,7 @@
                     searchByTmdbId();
                 } else {
                     var hint = (errMsg.indexOf('401') !== -1 || errMsg.indexOf('403') !== -1)
-                        ? 'Невірний Trakt Client ID (' + errMsg + ')'
+                        ? 'Невірний TRAKT_APP_ID (' + errMsg + ')'
                         : 'Не вдалося завантажити оцінки Trakt (' + errMsg + ')';
                     callback(createEmptyReactions(hint, false));
                 }
@@ -410,7 +884,7 @@
                 callback(createEmptyReactions('Фільм не знайдено на Trakt', false));
             }, function(errMsg) {
                 var hint = (errMsg.indexOf('401') !== -1 || errMsg.indexOf('403') !== -1)
-                    ? 'Невірний Trakt Client ID (' + errMsg + ')'
+                    ? 'Невірний TRAKT_APP_ID (' + errMsg + ')'
                     : 'Помилка пошуку Trakt (' + errMsg + ')';
                 callback(createEmptyReactions(hint, false));
             });
@@ -712,12 +1186,12 @@
         return { score: String(val), denom: '' };
     }
 
-    function getUserVote(mediaVoteKey) {
+    function getUserLocalVote(mediaVoteKey) {
         if (!window.Lampa || !Lampa.Storage) return '';
         return getStorageStr(VOTE_PREFIX + mediaVoteKey, '');
     }
 
-    function setUserVote(mediaVoteKey, reactionKey) {
+    function setUserLocalVote(mediaVoteKey, reactionKey) {
         if (!window.Lampa || !Lampa.Storage) return;
         if (reactionKey) {
             Lampa.Storage.set(VOTE_PREFIX + mediaVoteKey, reactionKey);
@@ -726,13 +1200,22 @@
         }
     }
 
-    function buildSortedPillsList(reactions, currentVote) {
+    function buildSortedPillsList(reactions, activeVote, initialTraktVote, loggedIn) {
         var list = new Array();
         var i;
         for (i = 0; i < REACTION_DEFS.length; i++) {
             var def = REACTION_DEFS[i];
             var baseCount = Number(reactions[def.key]) || 0;
-            var isSelected = (currentVote === def.key);
+            var isSelected = (activeVote === def.key);
+            var delta = 0;
+
+            if (loggedIn) {
+                if (isSelected && initialTraktVote !== def.key) delta = 1;
+                if (!isSelected && initialTraktVote === def.key) delta = -1;
+            } else {
+                if (isSelected) delta = 1;
+            }
+
             list.push({
                 key: def.key,
                 emoji: def.emoji,
@@ -740,7 +1223,7 @@
                 barColor: def.barColor,
                 label: def.label,
                 order: def.order,
-                count: baseCount + (isSelected ? 1 : 0),
+                count: Math.max(0, baseCount + delta),
                 isSelected: isSelected
             });
         }
@@ -1012,6 +1495,41 @@
             '  border: 1px solid rgba(255, 110, 64, 0.48);' +
             '  line-height: 1.35;' +
             '  word-break: break-word;' +
+            '}' +
+
+            '.mdb-trakt-auth-modal {' +
+            '  text-align: center;' +
+            '  padding: 1.2em 1em;' +
+            '  color: #ffffff;' +
+            '}' +
+            '.mdb-auth-desc {' +
+            '  font-size: 1.05em;' +
+            '  color: rgba(255, 255, 255, 0.82);' +
+            '  margin: 0.6em 0;' +
+            '}' +
+            '.mdb-auth-url {' +
+            '  display: inline-block;' +
+            '  font-size: 1.35em;' +
+            '  font-weight: 700;' +
+            '  color: #64b5f6;' +
+            '  margin: 0.3em 0 1em 0;' +
+            '}' +
+            '.mdb-auth-code {' +
+            '  display: inline-block;' +
+            '  margin: 0.45em 0 1em 0;' +
+            '  padding: 0.35em 0.85em;' +
+            '  font-size: 2.5em;' +
+            '  font-weight: 900;' +
+            '  letter-spacing: 0.18em;' +
+            '  color: #ffffff;' +
+            '  background: rgba(255, 255, 255, 0.14);' +
+            '  border: 2px solid rgba(255, 255, 255, 0.38);' +
+            '  border-radius: 12px;' +
+            '}' +
+            '.mdb-auth-status {' +
+            '  font-size: 0.95em;' +
+            '  color: rgba(255, 255, 255, 0.65);' +
+            '  margin-top: 0.4em;' +
             '}';
 
         var styleEl = document.createElement('style');
@@ -1045,8 +1563,12 @@
                     pillsRow.removeChild(pillsRow.firstChild);
                 }
 
-                var currentVote = getUserVote(mediaVoteKey);
-                var sortedPills = buildSortedPillsList(data.reactions, currentVote);
+                var loggedIn = isTraktLoggedIn();
+                var activeVote = loggedIn
+                    ? (data.userTraktVote !== undefined ? data.userTraktVote : '')
+                    : getUserLocalVote(mediaVoteKey);
+                var initialTraktVote = data.initialTraktVote || '';
+                var sortedPills = buildSortedPillsList(data.reactions, activeVote, initialTraktVote, loggedIn);
                 var hintSuffix = data.reactions.hintText ? (' (' + data.reactions.hintText + ')') : '';
                 var totalVotes = 0;
                 var i;
@@ -1117,11 +1639,19 @@
                             if (now - lastTapTs < 260) return;
                             lastTapTs = now;
 
-                            var prevVote = getUserVote(mediaVoteKey);
-                            var nextVote = (prevVote === item.key) ? '' : item.key;
-                            setUserVote(mediaVoteKey, nextVote);
-                            logDebug('Голос користувача оновлено:', mediaVoteKey, nextVote || 'скасовано');
-                            renderSortedPills(item.key);
+                            if (isTraktLoggedIn()) {
+                                var prevTrakt = data.userTraktVote || '';
+                                var nextTrakt = (prevTrakt === item.key) ? '' : item.key;
+                                data.userTraktVote = nextTrakt;
+                                syncReactionToTrakt(movie, data.mdbJson || null, nextTrakt);
+                                renderSortedPills(item.key);
+                            } else {
+                                var prevVote = getUserLocalVote(mediaVoteKey);
+                                var nextVote = (prevVote === item.key) ? '' : item.key;
+                                setUserLocalVote(mediaVoteKey, nextVote);
+                                logDebug('Локальний голос оновлено:', mediaVoteKey, nextVote || 'скасовано');
+                                renderSortedPills(item.key);
+                            }
                         };
 
                         pill.addEventListener('click', handleToggle);
@@ -1366,20 +1896,35 @@
         Lampa.SettingsApi.addParam({
             component: PLUGIN_COMPONENT,
             param: {
-                name: 'trakt_client_id',
-                type: 'input',
-                values: '',
-                placeholder: 'Вставте ваш Trakt Client ID',
-                default: ''
+                name: 'trakt_auth_btn',
+                type: 'button'
             },
             field: {
-                name: 'Trakt Client ID',
-                description: 'Client ID застосунку trakt.tv для точних реакцій за оцінками 1–10'
+                name: isTraktLoggedIn()
+                    ? 'Вийти з Trakt (Підключено)'
+                    : 'Увійти в акаунт Trakt (Код активації)',
+                description: 'Двостороння синхронізація ваших реакцій із профілем Trakt'
             },
             onChange: function() {
-                clearPluginCache(true);
+                if (isTraktLoggedIn()) {
+                    clearTraktTokens();
+                    updateAuthButtonText();
+                    if (window.Lampa && Lampa.Noty) {
+                        Lampa.Noty.show('Ви вийшли з акаунта Trakt');
+                    }
+                } else {
+                    startTraktDeviceAuth();
+                }
             }
         });
+
+        if (window.Lampa && Lampa.Settings && Lampa.Settings.listener) {
+            Lampa.Settings.listener.follow('open', function(ev) {
+                if (ev && ev.name === PLUGIN_COMPONENT) {
+                    window.setTimeout(updateAuthButtonText, 50);
+                }
+            });
+        }
 
         Lampa.SettingsApi.addParam({
             component: PLUGIN_COMPONENT,
@@ -1487,9 +2032,9 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.1.2',
+                version: '1.2.0',
                 name: 'MDBList Реакції та Рейтинги',
-                description: 'Реакції за оцінками Trakt API v2 та панель рейтингів з 7 платформ через MDBList API',
+                description: 'Двостороння синхронізація оцінок Trakt OAuth та панель рейтингів з 7 платформ через MDBList API',
                 component: PLUGIN_COMPONENT
             });
         }
@@ -1521,7 +2066,25 @@
 
                 if (cachedData) {
                     logDebug('Миттєвий рендер з кешу v13:', cacheKey);
-                    if (rootEl) renderIntoCard(rootEl, movie, cachedData);
+                    var cachedRenderState = {
+                        ratings: cachedData.ratings,
+                        reactions: cachedData.reactions,
+                        mdbJson: cachedData.mdbJson || null,
+                        apiError: cachedData.apiError || '',
+                        ratingsLoading: false,
+                        userTraktVote: '',
+                        initialTraktVote: ''
+                    };
+                    if (rootEl) renderIntoCard(rootEl, movie, cachedRenderState);
+
+                    if (isTraktLoggedIn() && keys.traktClientId) {
+                        fetchUserTraktRatingForMedia(movie, cachedRenderState.mdbJson, function(userReactionKey) {
+                            cachedRenderState.userTraktVote = userReactionKey;
+                            cachedRenderState.initialTraktVote = userReactionKey;
+                            var targetRoot = resolveRenderRoot(e) || rootEl;
+                            if (targetRoot) renderIntoCard(targetRoot, movie, cachedRenderState);
+                        });
+                    }
                     return;
                 }
 
@@ -1529,9 +2092,12 @@
                     ratings: new Array(),
                     reactions: keys.traktClientId
                         ? createEmptyReactions('Завантаження оцінок Trakt...', true)
-                        : createEmptyReactions('Вкажіть Trakt Client ID у Налаштуваннях', false),
+                        : createEmptyReactions('Вкажіть TRAKT_APP_ID у коді плагіна', false),
+                    mdbJson: null,
                     apiError: keys.mdblistKey ? '' : 'NO_KEY',
-                    ratingsLoading: Boolean(keys.mdblistKey)
+                    ratingsLoading: Boolean(keys.mdblistKey),
+                    userTraktVote: '',
+                    initialTraktVote: ''
                 };
 
                 var mdblistDone = !keys.mdblistKey;
@@ -1543,7 +2109,12 @@
                         renderIntoCard(currentRoot, movie, state);
                     }
                     if (mdblistDone && traktDone) {
-                        writeCache(cacheKey, state);
+                        writeCache(cacheKey, {
+                            ratings: state.ratings,
+                            reactions: state.reactions,
+                            mdbJson: state.mdbJson,
+                            apiError: state.apiError
+                        });
                     }
                 };
 
@@ -1561,6 +2132,7 @@
                     } else {
                         state.apiError = '';
                         state.ratings = json.ratings;
+                        state.mdbJson = json;
                         logDebug('MDBList API успішно повернув рейтингів:', json.ratings.length);
                     }
 
@@ -1572,6 +2144,14 @@
                             state.reactions = traktReactions;
                             syncCardAndCache();
                         });
+
+                        if (isTraktLoggedIn()) {
+                            fetchUserTraktRatingForMedia(movie, json, function(userReactionKey) {
+                                state.userTraktVote = userReactionKey;
+                                state.initialTraktVote = userReactionKey;
+                                syncCardAndCache();
+                            });
+                        }
                     }
                 });
             }, 150);

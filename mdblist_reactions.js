@@ -1,9 +1,8 @@
 (function() {
     'use strict';
 
-    var MDBLIST_API_KEY = '581re7xhn9uqc4v6gjj5p9fz9';
-    var CACHE_PREFIX = 'mdblist_v11_';
-    var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_', 'mdblist_v10_', 'mdblist_v12_');
+    var CACHE_PREFIX = 'mdblist_v13_';
+    var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_', 'mdblist_v10_', 'mdblist_v11_', 'mdblist_v12_');
     var VOTE_PREFIX = 'mdblist_user_vote_';
     var CACHE_TTL_MINUTES = 1440;
     var STYLE_ID = 'mdblist-reactions-plugin-styles';
@@ -40,15 +39,9 @@
         }
     }
 
-    function logHtml() {
-        if (window.console && typeof window.console.log === 'function') {
-            var args = new Array('[MDBList HTML]');
-            var i;
-            for (i = 0; i < arguments.length; i++) {
-                args.push(arguments[i]);
-            }
-            window.console.log.apply(window.console, args);
-        }
+    function trimStr(str) {
+        if (str === undefined || str === null) return '';
+        return String(str).replace(/^\s+|\s+$/g, '');
     }
 
     function getStorageBoolTrueDefault(key) {
@@ -64,6 +57,13 @@
         if (!window.Lampa || !Lampa.Storage) return defaultVal;
         var val = Lampa.Storage.get(key, defaultVal);
         return (val === undefined || val === null || val === '') ? defaultVal : String(val);
+    }
+
+    function getApiKeys() {
+        return {
+            mdblistKey: trimStr(getStorageStr('mdblist_api_key', '')),
+            traktClientId: trimStr(getStorageStr('trakt_client_id', ''))
+        };
     }
 
     function getSettings() {
@@ -102,9 +102,13 @@
             if (!raw || typeof raw !== 'object') {
                 return null;
             }
-            if (raw._ts && raw.payload && !raw.payload.apiError && !raw.payload.isLoading &&
-                raw.payload.ratings && raw.payload.ratings.length > 0 &&
-                raw.payload.reactions && raw.payload.reactions.isExact === true) {
+            if (raw._ts && raw.payload && !raw.payload.apiError && !raw.payload.isLoading) {
+                var keys = getApiKeys();
+                var mdblistOk = !keys.mdblistKey || (raw.payload.ratings && raw.payload.ratings.length > 0);
+                var traktOk = !keys.traktClientId || (raw.payload.reactions && raw.payload.reactions.isExact === true);
+                if (!mdblistOk || !traktOk) {
+                    return null;
+                }
                 var ageMs = new Date().getTime() - Number(raw._ts);
                 if (ageMs >= 0 && ageMs < CACHE_TTL_MINUTES * 60 * 1000) {
                     return raw.payload;
@@ -120,8 +124,10 @@
 
     function writeCache(cacheKey, payload) {
         try {
-            if (!payload || payload.apiError || payload.isLoading || !payload.ratings || payload.ratings.length === 0) return;
-            if (!payload.reactions || payload.reactions.isExact !== true) return;
+            if (!payload || payload.apiError || payload.isLoading) return;
+            var hasRatings = payload.ratings && payload.ratings.length > 0;
+            var hasExactReactions = payload.reactions && payload.reactions.isExact === true;
+            if (!hasRatings && !hasExactReactions) return;
             if (!window.Lampa || !Lampa.Storage) return;
             var wrapper = {
                 _ts: new Date().getTime(),
@@ -143,7 +149,7 @@
         return false;
     }
 
-    function clearPluginCache() {
+    function clearPluginCache(silent) {
         var removed = 0;
         try {
             if (window.localStorage) {
@@ -167,7 +173,7 @@
             /* ignore */
         }
         logDebug('Кеш очищено, видалено записів:', removed);
-        if (window.Lampa && Lampa.Noty) {
+        if (!silent && window.Lampa && Lampa.Noty) {
             Lampa.Noty.show('Кеш MDBList очищено');
         }
         return removed;
@@ -214,85 +220,7 @@
         return s;
     }
 
-    function parseNumberFromText(str) {
-        if (!str) return 0;
-        var cleaned = String(str).replace(/[\s,\.\u00a0]/g, '');
-        var val = parseInt(cleaned, 10);
-        return isNaN(val) ? 0 : val;
-    }
-
-    function parseMemberHistogramFromText(rawText) {
-        var bars = new Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-        var foundCount = 0;
-
-        if (!rawText || typeof rawText !== 'string') {
-            return { bars: bars, total: 0 };
-        }
-
-        var globalRegex = /Rating\s*(10|[1-9])\s*:\s*([\d,]+)/gi;
-        var match;
-        while ((match = globalRegex.exec(rawText)) !== null) {
-            var idx = parseInt(match[1], 10);
-            var v = parseNumberFromText(match[2]);
-            if (idx >= 1 && idx <= 10 && v > bars[idx]) {
-                bars[idx] = v;
-                foundCount++;
-            }
-        }
-
-        if (foundCount === 0) {
-            try {
-                if (window.DOMParser && rawText.indexOf('<') !== -1) {
-                    var parser = new DOMParser();
-                    var doc = parser.parseFromString(rawText, 'text/html');
-                    var nodes = doc.querySelectorAll('[title], [data-original-title], [data-bs-original-title], [aria-label]');
-                    var attrRegex = /Rating\s*(10|[1-9])\s*:\s*([\d,]+)/i;
-                    var i;
-                    for (i = 0; i < nodes.length; i++) {
-                        var el = nodes[i];
-                        var txt = el.getAttribute('title') ||
-                            el.getAttribute('data-bs-original-title') ||
-                            el.getAttribute('data-original-title') ||
-                            el.getAttribute('aria-label') || '';
-                        if (!txt) continue;
-                        var m = txt.match(attrRegex);
-                        if (m) {
-                            var ratingIdx = parseInt(m[1], 10);
-                            var voteVal = parseNumberFromText(m[2]);
-                            if (ratingIdx >= 1 && ratingIdx <= 10 && voteVal > bars[ratingIdx]) {
-                                bars[ratingIdx] = voteVal;
-                                foundCount++;
-                            }
-                        }
-                    }
-                }
-            } catch (err) {
-                /* ignore DOMParser errors */
-            }
-        }
-
-        var total = 0;
-        var k;
-        for (k = 1; k <= 10; k++) {
-            total += bars[k];
-        }
-
-        return { bars: bars, total: total };
-    }
-
-    function barsToReactions(bars, isExact) {
-        return {
-            masterpiece: (bars[9] || 0) + (bars[10] || 0),
-            worth: (bars[7] || 0) + (bars[8] || 0),
-            once: (bars[5] || 0) + (bars[6] || 0),
-            boring: (bars[3] || 0) + (bars[4] || 0),
-            weak: (bars[1] || 0) + (bars[2] || 0),
-            isExact: Boolean(isExact),
-            isPending: false
-        };
-    }
-
-    function createEmptyReactions(isPending) {
+    function createEmptyReactions(hintText, isPending) {
         return {
             masterpiece: 0,
             worth: 0,
@@ -300,97 +228,164 @@
             boring: 0,
             weak: 0,
             isExact: false,
-            isPending: Boolean(isPending)
+            isPending: Boolean(isPending),
+            hintText: hintText || ''
         };
     }
 
-    function buildSlugFromJson(json, movie) {
-        if (json && json.title) {
-            var rawBase = String(json.title) + (json.year ? ('-' + json.year) : '');
-            var slug = rawBase.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-            if (slug) return slug;
+    function distributionToReactions(dist) {
+        if (!dist || typeof dist !== 'object') {
+            return createEmptyReactions('Не вдалося отримати розподіл оцінок Trakt', false);
         }
-        if (json && json.ids && json.ids.slug) {
-            return String(json.ids.slug);
-        }
-        if (json && json.url) {
-            var parts = String(json.url).replace(/\/+$/, '').split('/');
-            var last = parts[parts.length - 1];
-            if (last) return last;
-        }
-        if (movie && (movie.original_title || movie.original_name)) {
-            var origTitle = String(movie.original_title || movie.original_name);
-            var releaseStr = movie.release_date || movie.first_air_date || '';
-            var yr = releaseStr ? releaseStr.substring(0, 4) : '';
-            var rawMovie = origTitle + (yr ? ('-' + yr) : '');
-            var mSlug = rawMovie.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-            if (mSlug) return mSlug;
-        }
-        return '';
+        var r1 = Number(dist['1']) || 0;
+        var r2 = Number(dist['2']) || 0;
+        var r3 = Number(dist['3']) || 0;
+        var r4 = Number(dist['4']) || 0;
+        var r5 = Number(dist['5']) || 0;
+        var r6 = Number(dist['6']) || 0;
+        var r7 = Number(dist['7']) || 0;
+        var r8 = Number(dist['8']) || 0;
+        var r9 = Number(dist['9']) || 0;
+        var r10 = Number(dist['10']) || 0;
+
+        return {
+            masterpiece: r9 + r10,
+            worth: r7 + r8,
+            once: r5 + r6,
+            boring: r3 + r4,
+            weak: r1 + r2,
+            isExact: true,
+            isPending: false,
+            hintText: ''
+        };
     }
 
-    function fetchMemberReactionsFromPage(json, movie) {
-        var typePath = movie.first_air_date ? 'show' : 'movie';
-        var slug = buildSlugFromJson(json, movie);
+    function xhrTraktGet(url, traktClientId, onSuccess, onError) {
+        var xhr = new XMLHttpRequest();
+        var settled = false;
 
-        if (!slug) {
-            logHtml('Не вдалося сформувати slug сторінки MDBList');
-            return Promise.resolve(createEmptyReactions(false));
-        }
+        var finishError = function(msg) {
+            if (settled) return;
+            settled = true;
+            onError(msg);
+        };
 
-        var pageUrl = 'https://mdblist.com/' + typePath + '/' + slug;
-        var jinaUrl = 'https://r.jina.ai/http://mdblist.com/' + typePath + '/' + slug;
-        var allOriginsUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(pageUrl);
+        var finishSuccess = function(data) {
+            if (settled) return;
+            settled = true;
+            onSuccess(data);
+        };
 
-        var attempts = new Array(
-            { name: 'Jina Reader', url: jinaUrl },
-            { name: 'AllOrigins', url: allOriginsUrl },
-            { name: 'Direct', url: pageUrl }
-        );
+        xhr.open('GET', url, true);
+        xhr.timeout = 12000;
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('trakt-api-version', '2');
+        xhr.setRequestHeader('trakt-api-key', traktClientId);
 
-        function tryAttempt(idx) {
-            if (idx >= attempts.length) {
-                logHtml('Усі 3 спроби отримання голосів MDBList не дали результату для:', pageUrl);
-                return Promise.resolve(createEmptyReactions(false));
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState !== 4) return;
+            logDebug('Trakt API відповідь:', url, 'status=' + xhr.status);
+            if (xhr.status !== 200) {
+                finishError('HTTP ' + xhr.status);
+                return;
             }
+            var parsed = null;
+            try {
+                parsed = JSON.parse(xhr.responseText);
+            } catch (err) {
+                finishError('Некоректний JSON від Trakt');
+                return;
+            }
+            finishSuccess(parsed);
+        };
 
-            var attempt = attempts[idx];
-            logHtml('Спроба #' + (idx + 1) + ' (' + attempt.name + '):', attempt.url);
+        xhr.ontimeout = function() {
+            finishError('Таймаут Trakt API');
+        };
 
-            return fetch(attempt.url).then(function(response) {
-                logHtml('Статус (' + attempt.name + '):', response.status);
-                if (!response.ok) {
-                    throw new Error('HTTP ' + response.status);
-                }
-                return response.text();
-            }).then(function(text) {
-                var len = text ? text.length : 0;
-                var hasRatingMarker = text && (text.indexOf('Rating 10:') !== -1 || text.indexOf('Rating 1:') !== -1 || /Rating\s*\d+\s*:/i.test(text));
-                var rIdx = text ? text.search(/Rating\s*(10|[1-9])\s*:/i) : -1;
-                var snippet = rIdx !== -1
-                    ? text.substring(Math.max(0, rIdx - 60), Math.min(len, rIdx + 260))
-                    : (text ? text.substring(0, 250) : '');
+        xhr.onerror = function() {
+            finishError('Помилка мережі Trakt API');
+        };
 
-                logHtml('Відповідь (' + attempt.name + '), len=' + len + ', marker=' + hasRatingMarker + ', фрагмент:', snippet);
+        try {
+            xhr.send();
+        } catch (sendErr) {
+            finishError('Помилка запиту Trakt');
+        }
+    }
 
-                if (!hasRatingMarker) {
-                    throw new Error('У тексті не знайдено Rating 1..10');
-                }
-
-                var parsed = parseMemberHistogramFromText(text);
-                logHtml('Розібрано голоси (' + attempt.name + '): total=' + parsed.total + ', bars=' + parsed.bars.slice(1).join(','));
-
-                if (parsed.total > 0) {
-                    return barsToReactions(parsed.bars, true);
-                }
-                throw new Error('Сума голосів дорівнює 0');
-            }).catch(function(err) {
-                logHtml('Помилка (' + attempt.name + '):', err && err.message ? err.message : err);
-                return tryAttempt(idx + 1);
-            });
+    function fetchTraktRatings(movie, mdbJson, traktClientId, callback) {
+        if (!traktClientId) {
+            callback(createEmptyReactions('Вкажіть Trakt Client ID у Налаштуваннях', false));
+            return;
         }
 
-        return tryAttempt(0);
+        var isShow = Boolean(movie.first_air_date);
+        var endpointType = isShow ? 'shows' : 'movies';
+        var searchType = isShow ? 'show' : 'movie';
+
+        var directId = '';
+        if (mdbJson && mdbJson.ids) {
+            if (mdbJson.ids.trakt) {
+                directId = String(mdbJson.ids.trakt);
+            } else if (mdbJson.ids.imdb) {
+                directId = String(mdbJson.ids.imdb);
+            }
+        }
+        if (!directId) {
+            directId = movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
+        }
+
+        var fetchRatingsByTargetId = function(targetId, allowSearchFallback) {
+            var ratingsUrl = 'https://api.trakt.tv/' + endpointType + '/' + encodeURIComponent(targetId) + '/ratings';
+            logDebug('Запит Trakt ratings:', ratingsUrl);
+
+            xhrTraktGet(ratingsUrl, traktClientId, function(data) {
+                if (data && data.distribution) {
+                    callback(distributionToReactions(data.distribution));
+                } else {
+                    callback(createEmptyReactions('Немає даних розподілу Trakt', false));
+                }
+            }, function(errMsg) {
+                if (allowSearchFallback && errMsg.indexOf('401') === -1 && errMsg.indexOf('403') === -1) {
+                    searchByTmdbId();
+                } else {
+                    var hint = (errMsg.indexOf('401') !== -1 || errMsg.indexOf('403') !== -1)
+                        ? 'Невірний Trakt Client ID (' + errMsg + ')'
+                        : 'Не вдалося завантажити оцінки Trakt (' + errMsg + ')';
+                    callback(createEmptyReactions(hint, false));
+                }
+            });
+        };
+
+        var searchByTmdbId = function() {
+            var searchUrl = 'https://api.trakt.tv/search/tmdb/' + movie.id + '?type=' + searchType;
+            logDebug('Пошук Trakt ID через TMDB:', searchUrl);
+
+            xhrTraktGet(searchUrl, traktClientId, function(results) {
+                if (results && results.length > 0) {
+                    var item = results[0];
+                    var mediaObj = item[searchType] || item.movie || item.show;
+                    var resolvedId = mediaObj && mediaObj.ids ? (mediaObj.ids.trakt || mediaObj.ids.slug || mediaObj.ids.imdb) : '';
+                    if (resolvedId) {
+                        fetchRatingsByTargetId(resolvedId, false);
+                        return;
+                    }
+                }
+                callback(createEmptyReactions('Фільм не знайдено на Trakt', false));
+            }, function(errMsg) {
+                var hint = (errMsg.indexOf('401') !== -1 || errMsg.indexOf('403') !== -1)
+                    ? 'Невірний Trakt Client ID (' + errMsg + ')'
+                    : 'Помилка пошуку Trakt (' + errMsg + ')';
+                callback(createEmptyReactions(hint, false));
+            });
+        };
+
+        if (directId) {
+            fetchRatingsByTargetId(directId, true);
+        } else {
+            searchByTmdbId();
+        }
     }
 
     function hasValidPositiveRatings(ratings) {
@@ -499,9 +494,14 @@
         tryNext(0);
     }
 
-    function fetchMdblistViaChain(movie, callback) {
+    function fetchMdblistViaChain(movie, mdblistKey, callback) {
+        if (!mdblistKey) {
+            callback('NO_KEY', null);
+            return;
+        }
+
         var type = movie.first_air_date ? 'show' : 'movie';
-        var targetUrl = 'https://api.mdblist.com/tmdb/' + type + '/' + movie.id + '?apikey=' + MDBLIST_API_KEY;
+        var targetUrl = 'https://api.mdblist.com/tmdb/' + type + '/' + movie.id + '?apikey=' + encodeURIComponent(mdblistKey);
         var imdbId = movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
 
         fetchWithProxyChain(targetUrl, function(errSummary, json) {
@@ -511,7 +511,7 @@
             }
             var isAuthErr = errSummary && (errSummary.indexOf('HTTP 401') !== -1 || errSummary.indexOf('HTTP 403') !== -1 || errSummary.indexOf('Invalid API') !== -1);
             if (imdbId && !isAuthErr) {
-                var imdbUrl = 'https://api.mdblist.com/imdb/' + imdbId + '?apikey=' + MDBLIST_API_KEY;
+                var imdbUrl = 'https://api.mdblist.com/imdb/' + imdbId + '?apikey=' + encodeURIComponent(mdblistKey);
                 logDebug('Повторний пошук за IMDb ID через проксі-ланцюг:', imdbId);
                 fetchWithProxyChain(imdbUrl, function(errSummary2, json2) {
                     if (!errSummary2 && json2) {
@@ -906,6 +906,16 @@
             '  color: rgba(255, 255, 255, 0.55);' +
             '}' +
 
+            '.mdb-hint-badge {' +
+            '  display: inline-block;' +
+            '  padding: 0.35em 0.7em;' +
+            '  border-radius: 6px;' +
+            '  font-size: 0.84em;' +
+            '  color: rgba(255, 255, 255, 0.65);' +
+            '  background: rgba(255, 255, 255, 0.07);' +
+            '  border: 1px solid rgba(255, 255, 255, 0.16);' +
+            '}' +
+
             '.mdb-error-badge {' +
             '  display: inline-block;' +
             '  padding: 0.38em 0.75em;' +
@@ -950,25 +960,18 @@
 
                 var currentVote = getUserVote(mediaVoteKey);
                 var sortedPills = buildSortedPillsList(data.reactions, currentVote);
-                var diagSuffix = '';
-                if (data.reactions.isExact) {
-                    diagSuffix = ' (MDBList: exact)';
-                } else if (data.reactions.isPending) {
-                    diagSuffix = ' (Завантаження...)';
-                } else {
-                    diagSuffix = ' (Не вдалося завантажити голоси MDBList)';
-                }
-
+                var hintSuffix = data.reactions.hintText ? (' (' + data.reactions.hintText + ')') : '';
                 var i;
+
                 for (i = 0; i < sortedPills.length; i++) {
-                    (function(item, pillIndex) {
+                    (function(item) {
                         var pill = document.createElement('div');
                         pill.className = 'mdb-pill selector' + (item.isSelected ? ' active' : '');
                         pill.setAttribute('data-reaction-key', item.key);
 
                         var tooltip = document.createElement('span');
                         tooltip.className = 'mdb-pill-tooltip';
-                        tooltip.textContent = item.label + (pillIndex === 0 ? diagSuffix : '');
+                        tooltip.textContent = item.label + hintSuffix;
 
                         var emojiEl = document.createElement('span');
                         emojiEl.className = 'mdb-pill-emoji';
@@ -1011,7 +1014,7 @@
                                 /* ignore focus error */
                             }
                         }
-                    })(sortedPills[i], i);
+                    })(sortedPills[i]);
                 }
             };
 
@@ -1023,11 +1026,20 @@
         ratingsRow.className = 'mdb-ratings-row';
         var renderedRatings = 0;
 
-        if (data.isLoading) {
+        if (data.ratingsLoading) {
             var loadEl = document.createElement('div');
             loadEl.className = 'mdb-loading-badge';
             loadEl.textContent = 'Завантаження рейтингів MDBList...';
             ratingsRow.appendChild(loadEl);
+            wrapper.appendChild(ratingsRow);
+            return wrapper;
+        }
+
+        if (data.apiError === 'NO_KEY') {
+            var hintEl = document.createElement('div');
+            hintEl.className = 'mdb-hint-badge';
+            hintEl.textContent = 'Вкажіть MDBList API Key у Налаштуваннях';
+            ratingsRow.appendChild(hintEl);
             wrapper.appendChild(ratingsRow);
             return wrapper;
         }
@@ -1199,6 +1211,42 @@
         Lampa.SettingsApi.addParam({
             component: PLUGIN_COMPONENT,
             param: {
+                name: 'mdblist_api_key',
+                type: 'input',
+                values: '',
+                placeholder: 'Вставте ваш MDBList API Key',
+                default: ''
+            },
+            field: {
+                name: 'MDBList API Key',
+                description: 'Ключ API з сайту mdblist.com для відображення рейтингів 8 платформ'
+            },
+            onChange: function() {
+                clearPluginCache(true);
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
+                name: 'trakt_client_id',
+                type: 'input',
+                values: '',
+                placeholder: 'Вставте ваш Trakt Client ID',
+                default: ''
+            },
+            field: {
+                name: 'Trakt Client ID',
+                description: 'Client ID застосунку trakt.tv для точних реакцій за оцінками 1–10'
+            },
+            onChange: function() {
+                clearPluginCache(true);
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
                 name: 'mdb_pill_style',
                 type: 'select',
                 values: {
@@ -1289,7 +1337,7 @@
                 description: 'Видалити збережені рейтинги та реакції для повторного завантаження'
             },
             onChange: function() {
-                clearPluginCache();
+                clearPluginCache(false);
             }
         });
     }
@@ -1299,9 +1347,9 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.0.7',
+                version: '1.1.0',
                 name: 'MDBList Реакції та Рейтинги',
-                description: 'Точні реакції учасників MDBList (1–10) та панель рейтингів з 8 платформ',
+                description: 'Реакції за оцінками Trakt API v2 та панель рейтингів з 8 платформ через MDBList API',
                 component: PLUGIN_COMPONENT
             });
         }
@@ -1321,64 +1369,66 @@
             logDebug('Подія full:complite для:', movie.id, movie.title || movie.name || '');
 
             var cachedData = readCache(cacheKey);
+            var keys = getApiKeys();
 
             window.setTimeout(function() {
                 var rootEl = resolveRenderRoot(e);
                 logDebug('Перевірка DOM через 150мс, rootEl знайдено:', Boolean(rootEl));
 
                 if (cachedData) {
-                    logDebug('Миттєвий рендер з кешу v11:', cacheKey);
+                    logDebug('Миттєвий рендер з кешу v13:', cacheKey);
                     if (rootEl) renderIntoCard(rootEl, movie, cachedData);
                     return;
                 }
 
-                if (rootEl) {
-                    renderIntoCard(rootEl, movie, { isLoading: true });
-                }
+                var state = {
+                    ratings: new Array(),
+                    reactions: keys.traktClientId
+                        ? createEmptyReactions('Завантаження оцінок Trakt...', true)
+                        : createEmptyReactions('Вкажіть Trakt Client ID у Налаштуваннях', false),
+                    apiError: keys.mdblistKey ? '' : 'NO_KEY',
+                    ratingsLoading: Boolean(keys.mdblistKey)
+                };
 
-                fetchMdblistViaChain(movie, function(errSummary, json) {
-                    var freshRoot = resolveRenderRoot(e) || rootEl;
-                    if (!freshRoot) {
-                        logDebug('Не знайдено rootEl після завершення запиту');
-                        return;
+                var mdblistDone = !keys.mdblistKey;
+                var traktDone = !keys.traktClientId;
+
+                var syncCardAndCache = function() {
+                    var currentRoot = resolveRenderRoot(e) || rootEl;
+                    if (currentRoot) {
+                        renderIntoCard(currentRoot, movie, state);
+                    }
+                    if (mdblistDone && traktDone) {
+                        writeCache(cacheKey, state);
+                    }
+                };
+
+                syncCardAndCache();
+
+                fetchMdblistViaChain(movie, keys.mdblistKey, function(errSummary, json) {
+                    state.ratingsLoading = false;
+                    mdblistDone = true;
+
+                    if (errSummary === 'NO_KEY') {
+                        state.apiError = 'NO_KEY';
+                    } else if (errSummary || !json || !hasValidPositiveRatings(json.ratings)) {
+                        state.apiError = errSummary || 'Порожній масив ratings';
+                        logDebug('MDBList API помилка:', state.apiError);
+                    } else {
+                        state.apiError = '';
+                        state.ratings = json.ratings;
+                        logDebug('MDBList API успішно повернув рейтингів:', json.ratings.length);
                     }
 
-                    if (errSummary || !json || !hasValidPositiveRatings(json.ratings)) {
-                        var finalErr = errSummary || 'Порожній масив ratings';
-                        logDebug('Усі спроби MDBList API завершилися помилкою:', finalErr);
-                        renderIntoCard(freshRoot, movie, {
-                            ratings: new Array(),
-                            reactions: null,
-                            apiError: finalErr
+                    syncCardAndCache();
+
+                    if (keys.traktClientId) {
+                        fetchTraktRatings(movie, json, keys.traktClientId, function(traktReactions) {
+                            traktDone = true;
+                            state.reactions = traktReactions;
+                            syncCardAndCache();
                         });
-                        return;
                     }
-
-                    logDebug('MDBList API успішно повернув рейтингів:', json.ratings.length);
-
-                    var immediatePayload = {
-                        ratings: json.ratings,
-                        reactions: createEmptyReactions(true),
-                        apiError: '',
-                        isLoading: false
-                    };
-                    renderIntoCard(freshRoot, movie, immediatePayload);
-
-                    fetchMemberReactionsFromPage(json, movie).then(function(memberReactions) {
-                        var finalPayload = {
-                            ratings: json.ratings,
-                            reactions: memberReactions,
-                            apiError: '',
-                            isLoading: false
-                        };
-                        if (memberReactions && memberReactions.isExact === true) {
-                            writeCache(cacheKey, finalPayload);
-                        }
-                        var targetRoot = resolveRenderRoot(e) || freshRoot;
-                        if (targetRoot) {
-                            renderIntoCard(targetRoot, movie, finalPayload);
-                        }
-                    });
                 });
             }, 150);
         });

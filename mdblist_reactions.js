@@ -2,8 +2,8 @@
     'use strict';
 
     var MDBLIST_API_KEY = '581re7xhn9uqc4v6gjj5p9fz9';
-    var CACHE_PREFIX = 'mdblist_v11_';
-    var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_', 'mdblist_v10_');
+    var CACHE_PREFIX = 'mdblist_v12_';
+    var OLD_CACHE_PREFIXES = new Array('mdblist_v7_', 'mdblist_v8_', 'mdblist_v9_', 'mdblist_v10_', 'mdblist_v11_');
     var VOTE_PREFIX = 'mdblist_user_vote_';
     var CACHE_TTL_MINUTES = 1440;
     var STYLE_ID = 'mdblist-reactions-plugin-styles';
@@ -32,6 +32,17 @@
     function logDebug() {
         if (window.console && typeof window.console.log === 'function') {
             var args = new Array('[MDBList Plugin]');
+            var i;
+            for (i = 0; i < arguments.length; i++) {
+                args.push(arguments[i]);
+            }
+            window.console.log.apply(window.console, args);
+        }
+    }
+
+    function logHtml() {
+        if (window.console && typeof window.console.log === 'function') {
+            var args = new Array('[MDBList HTML]');
             var i;
             for (i = 0; i < arguments.length; i++) {
                 args.push(arguments[i]);
@@ -215,21 +226,20 @@
             return { bars: bars, total: 0 };
         }
 
-        var attrRegex = /(?:Rating|Рейтинг|Оценка)\s*(10|[1-9])\s*[:\-]\s*([\d\s,\.\u00a0]+)/i;
+        var attrRegex = /Rating\s*(10|[1-9])\s*:\s*([\d,\.\s\u00a0]+)\s*vote/i;
 
         try {
             if (window.DOMParser) {
                 var parser = new DOMParser();
                 var doc = parser.parseFromString(htmlText, 'text/html');
-                var nodes = doc.querySelectorAll('[title], [data-original-title], [data-bs-original-title], [aria-label], [data-tooltip]');
+                var nodes = doc.querySelectorAll('[title], [data-original-title], [data-bs-original-title], [aria-label]');
                 var i;
                 for (i = 0; i < nodes.length; i++) {
                     var el = nodes[i];
                     var txt = el.getAttribute('data-original-title') ||
                         el.getAttribute('data-bs-original-title') ||
                         el.getAttribute('title') ||
-                        el.getAttribute('aria-label') ||
-                        el.getAttribute('data-tooltip') || '';
+                        el.getAttribute('aria-label') || '';
                     if (!txt) continue;
                     var m = txt.match(attrRegex);
                     if (m) {
@@ -247,13 +257,39 @@
         }
 
         if (foundCount === 0) {
-            var globalRegex = /(?:Rating|Рейтинг|Оценка)\s*(10|[1-9])\s*[:\-]\s*([\d\s,\.\u00a0]+)\s*(?:votes|vote|голос|голоси|голосів)?/gi;
+            var globalRegex = /Rating\s*(10|[1-9])\s*:\s*([\d,\.\s\u00a0]+)\s*vote/gi;
             var match;
             while ((match = globalRegex.exec(htmlText)) !== null) {
                 var idx = parseInt(match[1], 10);
                 var v = parseNumberFromText(match[2]);
                 if (idx >= 1 && idx <= 10 && v > bars[idx]) {
                     bars[idx] = v;
+                    foundCount++;
+                }
+            }
+        }
+
+        if (foundCount === 0) {
+            var jsonPairRegex1 = /"rating"\s*:\s*(10|[1-9])\s*,\s*"votes"\s*:\s*(\d+)/gi;
+            var pMatch1;
+            while ((pMatch1 = jsonPairRegex1.exec(htmlText)) !== null) {
+                var rIdx1 = parseInt(pMatch1[1], 10);
+                var rVal1 = parseInt(pMatch1[2], 10) || 0;
+                if (rIdx1 >= 1 && rIdx1 <= 10 && rVal1 > bars[rIdx1]) {
+                    bars[rIdx1] = rVal1;
+                    foundCount++;
+                }
+            }
+        }
+
+        if (foundCount === 0) {
+            var jsonPairRegex2 = /"votes"\s*:\s*(\d+)\s*,\s*"rating"\s*:\s*(10|[1-9])/gi;
+            var pMatch2;
+            while ((pMatch2 = jsonPairRegex2.exec(htmlText)) !== null) {
+                var rVal2 = parseInt(pMatch2[1], 10) || 0;
+                var rIdx2 = parseInt(pMatch2[2], 10);
+                if (rIdx2 >= 1 && rIdx2 <= 10 && rVal2 > bars[rIdx2]) {
+                    bars[rIdx2] = rVal2;
                     foundCount++;
                 }
             }
@@ -294,13 +330,14 @@
         return { bars: bars, total: total };
     }
 
-    function barsToReactions(bars) {
+    function barsToReactions(bars, isExact) {
         return {
             masterpiece: (bars[9] || 0) + (bars[10] || 0),
             worth: (bars[7] || 0) + (bars[8] || 0),
             once: (bars[5] || 0) + (bars[6] || 0),
             boring: (bars[3] || 0) + (bars[4] || 0),
-            weak: (bars[1] || 0) + (bars[2] || 0)
+            weak: (bars[1] || 0) + (bars[2] || 0),
+            isExact: Boolean(isExact)
         };
     }
 
@@ -312,7 +349,8 @@
                 worth: 0,
                 once: 0,
                 boring: 0,
-                weak: 0
+                weak: 0,
+                isExact: false
             };
         }
 
@@ -338,54 +376,126 @@
             bars[k] = Math.round((dist[k] / distSum) * memberBase);
         }
 
-        return barsToReactions(bars);
+        return barsToReactions(bars, false);
     }
 
-    function buildMdblistPageUrl(json, movie) {
-        if (json && json.url) {
-            if (json.url.indexOf('http') === 0) return json.url;
-            if (json.url.indexOf('/') === 0) return 'https://mdblist.com' + json.url;
-            return 'https://mdblist.com/' + json.url;
-        }
+    function buildCandidatePageUrls(json, movie) {
         var pathType = movie.first_air_date ? 'show/' : 'movie/';
-        var slugOrId = '';
-        if (json && json.ids) {
-            if (json.ids.mdblist) {
-                slugOrId = String(json.ids.mdblist);
-            } else if (json.ids.slug) {
-                slugOrId = String(json.ids.slug);
+        var urls = new Array();
+        var seen = {};
+
+        var addCandidate = function(u) {
+            if (!u || seen[u]) return;
+            seen[u] = true;
+            urls.push(u);
+        };
+
+        if (json && json.title) {
+            var rawBase = String(json.title) + (json.year ? ('-' + json.year) : '');
+            var titleSlug = rawBase.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+            if (titleSlug) {
+                addCandidate('https://mdblist.com/' + pathType + titleSlug);
             }
         }
-        if (!slugOrId) return '';
-        return 'https://mdblist.com/' + pathType + slugOrId;
+
+        if (json && json.ids && json.ids.slug) {
+            addCandidate('https://mdblist.com/' + pathType + json.ids.slug);
+        }
+
+        if (json && json.url) {
+            var jUrl = String(json.url);
+            if (jUrl.indexOf('http') !== 0) {
+                jUrl = 'https://mdblist.com' + (jUrl.indexOf('/') === 0 ? '' : '/') + jUrl;
+            }
+            addCandidate(jUrl);
+        }
+
+        if (json && json.ratings && json.ratings.length > 0) {
+            var i;
+            for (i = 0; i < json.ratings.length; i++) {
+                var rUrl = json.ratings[i] && json.ratings[i].url ? String(json.ratings[i].url) : '';
+                if (rUrl.indexOf('mdblist.com/') !== -1) {
+                    addCandidate(rUrl);
+                }
+            }
+        }
+
+        if (json && json.ids && json.ids.mdblist) {
+            addCandidate('https://mdblist.com/' + pathType + json.ids.mdblist);
+        }
+
+        return urls;
+    }
+
+    function fetchHtmlStringWithFallback(pageUrl) {
+        var attempts = new Array(
+            { name: 'Direct', url: pageUrl },
+            { name: 'corsproxy.io', url: 'https://corsproxy.io/?' + encodeURIComponent(pageUrl) },
+            { name: 'allorigins', url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(pageUrl) }
+        );
+
+        function tryAttempt(idx) {
+            if (idx >= attempts.length) {
+                return Promise.reject(new Error('Усі спроби завантаження HTML невдалі для ' + pageUrl));
+            }
+            var attempt = attempts[idx];
+            logHtml('Запит (' + attempt.name + '):', attempt.url);
+
+            return fetch(attempt.url).then(function(response) {
+                logHtml('Відповідь (' + attempt.name + '): status=' + response.status);
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
+                return response.text();
+            }).then(function(htmlText) {
+                var len = htmlText ? htmlText.length : 0;
+                var ratingIdx = htmlText ? htmlText.indexOf('Rating ') : -1;
+                var snippet = ratingIdx !== -1
+                    ? htmlText.substring(Math.max(0, ratingIdx - 80), Math.min(len, ratingIdx + 260))
+                    : (htmlText ? htmlText.substring(0, 320) : '');
+                logHtml('Отримано HTML (' + attempt.name + '), довжина=' + len + ', фрагмент:', snippet);
+
+                if (!htmlText || len < 200 || (htmlText.indexOf('Just a moment') !== -1 && htmlText.indexOf('cf-browser-verification') !== -1)) {
+                    throw new Error('Cloudflare або порожня сторінка');
+                }
+                return htmlText;
+            }).catch(function(err) {
+                logHtml('Помилка (' + attempt.name + '):', err && err.message ? err.message : err);
+                return tryAttempt(idx + 1);
+            });
+        }
+
+        return tryAttempt(0);
     }
 
     function fetchMemberReactionsFromPage(json, movie) {
-        var pageUrl = buildMdblistPageUrl(json, movie);
-        if (!pageUrl) {
-            logDebug('Не вдалося побудувати URL сторінки MDBList, fallback за json.score');
+        var candidateUrls = buildCandidatePageUrls(json, movie);
+        logHtml('Кандидати URL сторінки MDBList:', candidateUrls.join(' , '));
+
+        if (candidateUrls.length === 0) {
             return Promise.resolve(computeScoreFallbackReactions(json));
         }
 
-        logDebug('Запит HTML сторінки MDBList для гістограми учасників:', pageUrl);
+        function tryUrlIndex(idx) {
+            if (idx >= candidateUrls.length) {
+                logHtml('Жоден URL не містить голосів учасників, використовується fallback за json.score');
+                return Promise.resolve(computeScoreFallbackReactions(json));
+            }
 
-        return fetch(pageUrl).then(function(response) {
-            logDebug('HTML відповідь MDBList:', pageUrl, 'status=' + response.status);
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status);
-            }
-            return response.text();
-        }).then(function(htmlText) {
-            var parsed = parseMemberHistogramFromHtml(htmlText);
-            logDebug('Отримано голосів учасників MDBList:', parsed.total);
-            if (parsed.total > 0) {
-                return barsToReactions(parsed.bars);
-            }
-            return computeScoreFallbackReactions(json);
-        }).catch(function(err) {
-            logDebug('Помилка завантаження/парсингу HTML MDBList:', err && err.message ? err.message : err);
-            return computeScoreFallbackReactions(json);
-        });
+            var pageUrl = candidateUrls[idx];
+            return fetchHtmlStringWithFallback(pageUrl).then(function(htmlText) {
+                var parsed = parseMemberHistogramFromHtml(htmlText);
+                logHtml('Результат парсингу для ' + pageUrl + ': total=' + parsed.total + ', bars=' + parsed.bars.slice(1).join(','));
+                if (parsed.total > 0) {
+                    return barsToReactions(parsed.bars, true);
+                }
+                return tryUrlIndex(idx + 1);
+            }).catch(function() {
+                return tryUrlIndex(idx + 1);
+            });
+        }
+
+        return tryUrlIndex(0);
     }
 
     function hasValidPositiveRatings(ratings) {
@@ -945,17 +1055,18 @@
 
                 var currentVote = getUserVote(mediaVoteKey);
                 var sortedPills = buildSortedPillsList(data.reactions, currentVote);
+                var diagSuffix = data.reactions.isExact ? ' (MDBList: exact)' : ' (Fallback: estimated)';
                 var i;
 
                 for (i = 0; i < sortedPills.length; i++) {
-                    (function(item) {
+                    (function(item, pillIndex) {
                         var pill = document.createElement('div');
                         pill.className = 'mdb-pill selector' + (item.isSelected ? ' active' : '');
                         pill.setAttribute('data-reaction-key', item.key);
 
                         var tooltip = document.createElement('span');
                         tooltip.className = 'mdb-pill-tooltip';
-                        tooltip.textContent = item.label;
+                        tooltip.textContent = item.label + (pillIndex === 0 ? diagSuffix : '');
 
                         var emojiEl = document.createElement('span');
                         emojiEl.className = 'mdb-pill-emoji';
@@ -998,7 +1109,7 @@
                                 /* ignore focus error */
                             }
                         }
-                    })(sortedPills[i]);
+                    })(sortedPills[i], i);
                 }
             };
 
@@ -1286,7 +1397,7 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.0.5',
+                version: '1.0.6',
                 name: 'MDBList Реакції та Рейтинги',
                 description: 'Точні реакції учасників MDBList (1–10) та панель рейтингів з 8 платформ',
                 component: PLUGIN_COMPONENT
@@ -1314,7 +1425,7 @@
                 logDebug('Перевірка DOM через 150мс, rootEl знайдено:', Boolean(rootEl));
 
                 if (cachedData) {
-                    logDebug('Миттєвий рендер з кешу v11:', cacheKey);
+                    logDebug('Миттєвий рендер з кешу v12:', cacheKey);
                     if (rootEl) renderIntoCard(rootEl, movie, cachedData);
                     return;
                 }

@@ -24,8 +24,7 @@
         'letterboxd',
         'tomatoes',
         'popcorn',
-        'metacritic',
-        'rogerebert'
+        'metacritic'
     );
 
     function logDebug() {
@@ -78,8 +77,7 @@
             showLetterboxd: getStorageBoolTrueDefault('mdb_show_letterboxd'),
             showTomatoes: getStorageBoolTrueDefault('mdb_show_tomatoes'),
             showPopcorn: getStorageBoolTrueDefault('mdb_show_popcorn'),
-            showMetacritic: getStorageBoolTrueDefault('mdb_show_metacritic'),
-            showRogerebert: getStorageBoolTrueDefault('mdb_show_rogerebert')
+            showMetacritic: getStorageBoolTrueDefault('mdb_show_metacritic')
         };
     }
 
@@ -91,7 +89,6 @@
         if (sourceKey === 'tomatoes') return settings.showTomatoes;
         if (sourceKey === 'popcorn') return settings.showPopcorn;
         if (sourceKey === 'metacritic') return settings.showMetacritic;
-        if (sourceKey === 'rogerebert') return settings.showRogerebert;
         return false;
     }
 
@@ -216,7 +213,6 @@
         if (!rawSource) return '';
         var s = String(rawSource).toLowerCase();
         if (s === 'tomatoesaudience') return 'popcorn';
-        if (s === 'ebert') return 'rogerebert';
         return s;
     }
 
@@ -634,13 +630,6 @@
                 '</svg>';
         }
 
-        if (sourceKey === 'rogerebert') {
-            return '<svg class="mdb-svg" viewBox="0 0 48 48" width="28" height="28">' +
-                '<path d="M12 22 H17 V40 H12 C10.3 40 9 38.7 9 37 V25 C9 23.3 10.3 22 12 22 Z" fill="#FFFFFF"/>' +
-                '<path d="M20 21 L25.5 9.5 C26.3 7.8 28.4 7.2 30 8.1 C31.4 8.9 32 10.6 31.4 12.1 L29.2 18 H37.5 C39.8 18 41.5 20.1 41.1 22.4 L38.9 36.4 C38.5 38.5 36.7 40 34.6 40 H20 V21 Z" fill="#FFFFFF"/>' +
-                '</svg>';
-        }
-
         return '';
     }
 
@@ -652,8 +641,7 @@
             letterboxd: { label: 'LBXD', bg: '#00E054', fg: '#111111' },
             tomatoes: { label: 'RT', bg: '#FA320A', fg: '#FFFFFF' },
             popcorn: { label: 'POP', bg: '#FFCC00', fg: '#111111' },
-            metacritic: { label: 'MC', bg: '#D4AF37', fg: '#111111' },
-            rogerebert: { label: 'EBERT', bg: '#3C404B', fg: '#FFFFFF' }
+            metacritic: { label: 'MC', bg: '#D4AF37', fg: '#111111' }
         };
         var info = map[sourceKey] || { label: sourceKey.toUpperCase(), bg: '#444', fg: '#FFF' };
         return '<span class="mdb-text-badge" style="background:' + info.bg + ';color:' + info.fg + ';">' + info.label + '</span>';
@@ -681,9 +669,6 @@
         }
         if (sourceKey === 'metacritic') {
             return { score: String(Math.round(val)), denom: '/100' };
-        }
-        if (sourceKey === 'rogerebert') {
-            return { score: val.toFixed(1), denom: '/4' };
         }
         return { score: String(val), denom: '' };
     }
@@ -731,6 +716,9 @@
         if (document.getElementById(STYLE_ID)) return;
 
         var css = '' +
+            '.full-start__rate-line, .full-start-new__rate-line {' +
+            '  display: none !important;' +
+            '}' +
             '.mdb-reactions-wrapper {' +
             '  position: relative;' +
             '  z-index: 2;' +
@@ -1147,19 +1135,30 @@
         return (el && el.querySelector) ? el : null;
     }
 
+    function hideDefaultCardRates(rootEl) {
+        if (!rootEl || !rootEl.querySelectorAll) return;
+
+        if (window.$) {
+            window.$(rootEl).find('.full-start__rate-line, .full-start-new__rate-line, .full-start__reactions, .full-start-new__reactions').hide();
+        }
+
+        var defaultNodes = rootEl.querySelectorAll('.full-start__rate-line, .full-start-new__rate-line, .full-start__reactions, .full-start-new__reactions');
+        var i;
+        for (i = 0; i < defaultNodes.length; i++) {
+            defaultNodes[i].style.display = 'none';
+        }
+    }
+
     function renderIntoCard(rootEl, movie, data) {
         if (!rootEl || !rootEl.querySelector) {
             logDebug('Кореневий DOM елемент картки не знайдено');
             return false;
         }
 
-        var existingReactions = rootEl.querySelectorAll('.full-start__reactions, .full-start-new__reactions');
-        var i;
-        for (i = 0; i < existingReactions.length; i++) {
-            existingReactions[i].style.display = 'none';
-        }
+        hideDefaultCardRates(rootEl);
 
         var oldWrappers = rootEl.querySelectorAll('.mdb-reactions-wrapper');
+        var i;
         for (i = 0; i < oldWrappers.length; i++) {
             if (oldWrappers[i].parentNode) {
                 oldWrappers[i].parentNode.removeChild(oldWrappers[i]);
@@ -1219,7 +1218,7 @@
             },
             field: {
                 name: 'MDBList API Key',
-                description: 'Ключ API з сайту mdblist.com для відображення рейтингів 8 платформ'
+                description: 'Ключ API з сайту mdblist.com для відображення рейтингів 7 платформ'
             },
             onChange: function() {
                 clearPluginCache(true);
@@ -1307,8 +1306,7 @@
             { key: 'mdb_show_letterboxd', title: 'Показувати Letterboxd' },
             { key: 'mdb_show_tomatoes', title: 'Показувати Rotten Tomatoes' },
             { key: 'mdb_show_popcorn', title: 'Показувати Popcornmeter' },
-            { key: 'mdb_show_metacritic', title: 'Показувати Metacritic' },
-            { key: 'mdb_show_rogerebert', title: 'Показувати Roger Ebert' }
+            { key: 'mdb_show_metacritic', title: 'Показувати Metacritic' }
         );
 
         var i;
@@ -1347,9 +1345,9 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.1.0',
+                version: '1.1.1',
                 name: 'MDBList Реакції та Рейтинги',
-                description: 'Реакції за оцінками Trakt API v2 та панель рейтингів з 8 платформ через MDBList API',
+                description: 'Реакції за оцінками Trakt API v2 та панель рейтингів з 7 платформ через MDBList API',
                 component: PLUGIN_COMPONENT
             });
         }
@@ -1374,6 +1372,10 @@
             window.setTimeout(function() {
                 var rootEl = resolveRenderRoot(e);
                 logDebug('Перевірка DOM через 150мс, rootEl знайдено:', Boolean(rootEl));
+
+                if (rootEl) {
+                    hideDefaultCardRates(rootEl);
+                }
 
                 if (cachedData) {
                     logDebug('Миттєвий рендер з кешу v13:', cacheKey);

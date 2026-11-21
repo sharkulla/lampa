@@ -1,48 +1,598 @@
 (function() {
     'use strict';
 
-    if (window.mdblist_reactions_plugin_loaded) return;
-    window.mdblist_reactions_plugin_loaded = true;
-
     var MDBLIST_API_KEY = 'utha0wvg7a0g4kwl10yee3t6x';
-    var CACHE_MINUTES = 1440;
-    var GAUSSIAN_SIGMA = 1.65;
-    var STYLE_ID = 'mdblist-reactions-styles-v1';
-    var svgUid = 0;
+    var CACHE_PREFIX = 'mdblist_v7_';
+    var VOTE_PREFIX = 'mdblist_user_vote_';
+    var CACHE_TTL_MINUTES = 1440;
+    var STYLE_ID = 'mdblist-reactions-plugin-styles';
+    var PLUGIN_COMPONENT = 'mdblist_reactions';
+    var initialized = false;
 
     var REACTION_DEFS = new Array(
-        { key: 'fire', emoji: '\uD83D\uDD25', tooltip: 'Шедевр' },
-        { key: 'like', emoji: '\uD83D\uDC4D', tooltip: 'Варто глянути' },
-        { key: 'meh', emoji: '\uD83E\uDD14', tooltip: 'На один раз' },
-        { key: 'sleep', emoji: '\uD83D\uDE34', tooltip: 'Нудно' },
-        { key: 'poop', emoji: '\uD83D\uDCA9', tooltip: 'Слабко' }
+        { key: 'masterpiece', emoji: '🔥', label: 'Шедевр' },
+        { key: 'worth', emoji: '👍', label: 'Варто глянути' },
+        { key: 'once', emoji: '🤔', label: 'На один раз' },
+        { key: 'boring', emoji: '😴', label: 'Нудно' },
+        { key: 'weak', emoji: '💩', label: 'Слабко' }
     );
 
-    var PLATFORM_ORDER = new Array('imdb', 'trakt', 'tmdb', 'tomatoes', 'popcorn', 'metacritic');
+    var PLATFORM_ORDER = new Array(
+        'imdb',
+        'trakt',
+        'tmdb',
+        'letterboxd',
+        'tomatoes',
+        'popcorn',
+        'metacritic',
+        'rogerebert'
+    );
 
-    function registerManifest() {
-        if (!window.Lampa || !Lampa.Manifest) return;
-        if (typeof Lampa.Manifest.plugins !== 'object' || Lampa.Manifest.plugins === null) {
-            Lampa.Manifest.plugins = new Array();
-        }
-        var meta = {
-            type: 'other',
-            version: '1.0.0',
-            name: 'MDBList Реакції та Рейтинги',
-            description: 'Реакції глядачів та детальні рейтинги з кількістю голосів',
-            component: 'mdblist_reactions'
+    function getStorageBool(key, defaultVal) {
+        if (!window.Lampa || !Lampa.Storage) return defaultVal;
+        var val = Lampa.Storage.get(key, defaultVal);
+        if (val === 'false' || val === false) return false;
+        if (val === 'true' || val === true) return true;
+        return Boolean(val);
+    }
+
+    function getStorageStr(key, defaultVal) {
+        if (!window.Lampa || !Lampa.Storage) return defaultVal;
+        var val = Lampa.Storage.get(key, defaultVal);
+        return (val === undefined || val === null || val === '') ? defaultVal : String(val);
+    }
+
+    function getSettings() {
+        return {
+            pillStyle: getStorageStr('mdb_pill_style', 'glass'),
+            badgeStyle: getStorageStr('mdb_badge_style', 'original'),
+            scale: getStorageStr('mdb_scale', '1.0'),
+            showPills: getStorageBool('mdb_show_pills', true),
+            showImdb: getStorageBool('mdb_show_imdb', true),
+            showTrakt: getStorageBool('mdb_show_trakt', true),
+            showTmdb: getStorageBool('mdb_show_tmdb', true),
+            showLetterboxd: getStorageBool('mdb_show_letterboxd', true),
+            showTomatoes: getStorageBool('mdb_show_tomatoes', true),
+            showPopcorn: getStorageBool('mdb_show_popcorn', true),
+            showMetacritic: getStorageBool('mdb_show_metacritic', true),
+            showRogerebert: getStorageBool('mdb_show_rogerebert', true)
         };
-        if (typeof Lampa.Manifest.plugins.push === 'function') {
-            var exists = false;
-            for (var i = 0; i < Lampa.Manifest.plugins.length; i++) {
-                if (Lampa.Manifest.plugins[i] && Lampa.Manifest.plugins[i].component === 'mdblist_reactions') {
-                    exists = true;
-                    break;
+    }
+
+    function isPlatformEnabled(sourceKey, settings) {
+        if (sourceKey === 'imdb') return settings.showImdb;
+        if (sourceKey === 'trakt') return settings.showTrakt;
+        if (sourceKey === 'tmdb') return settings.showTmdb;
+        if (sourceKey === 'letterboxd') return settings.showLetterboxd;
+        if (sourceKey === 'tomatoes') return settings.showTomatoes;
+        if (sourceKey === 'popcorn') return settings.showPopcorn;
+        if (sourceKey === 'metacritic') return settings.showMetacritic;
+        if (sourceKey === 'rogerebert') return settings.showRogerebert;
+        return false;
+    }
+
+    function readCache(cacheKey) {
+        try {
+            if (!window.Lampa || !Lampa.Storage) return null;
+            var raw = Lampa.Storage.get(cacheKey, null);
+            if (!raw || typeof raw !== 'object') {
+                if (typeof Lampa.Storage.cache === 'function') {
+                    var legacy = Lampa.Storage.cache(cacheKey, CACHE_TTL_MINUTES);
+                    if (legacy && legacy.ratings) return legacy;
+                }
+                return null;
+            }
+            if (raw._ts && raw.payload) {
+                var ageMs = new Date().getTime() - Number(raw._ts);
+                if (ageMs >= 0 && ageMs < CACHE_TTL_MINUTES * 60 * 1000) {
+                    return raw.payload;
+                }
+                Lampa.Storage.remove(cacheKey);
+                return null;
+            }
+            return null;
+        } catch (err) {
+            return null;
+        }
+    }
+
+    function writeCache(cacheKey, payload) {
+        try {
+            if (!payload || !payload.ratings || payload.ratings.length === 0) return;
+            if (!window.Lampa || !Lampa.Storage) return;
+            var wrapper = {
+                _ts: new Date().getTime(),
+                payload: payload
+            };
+            Lampa.Storage.set(cacheKey, wrapper);
+        } catch (err) {
+            /* ignore storage quota errors */
+        }
+    }
+
+    function clearPluginCache() {
+        var removed = 0;
+        try {
+            if (window.localStorage) {
+                var keysToRemove = new Array();
+                var i;
+                for (i = 0; i < window.localStorage.length; i++) {
+                    var k = window.localStorage.key(i);
+                    if (k && k.indexOf(CACHE_PREFIX) === 0) {
+                        keysToRemove.push(k);
+                    }
+                }
+                for (i = 0; i < keysToRemove.length; i++) {
+                    window.localStorage.removeItem(keysToRemove[i]);
+                    if (window.Lampa && Lampa.Storage && typeof Lampa.Storage.remove === 'function') {
+                        Lampa.Storage.remove(keysToRemove[i]);
+                    }
+                    removed++;
                 }
             }
-            if (!exists) Lampa.Manifest.plugins.push(meta);
+        } catch (err) {
+            /* ignore */
+        }
+        if (window.Lampa && Lampa.Noty) {
+            Lampa.Noty.show('Кеш MDBList очищено');
+        }
+        return removed;
+    }
+
+    function formatVotePlural(count) {
+        var n = Math.abs(Math.round(count));
+        var mod100 = n % 100;
+        var mod10 = n % 10;
+        if (mod100 >= 11 && mod100 <= 19) return 'голосів';
+        if (mod10 === 1) return 'голос';
+        if (mod10 >= 2 && mod10 <= 4) return 'голоси';
+        return 'голосів';
+    }
+
+    function formatVotesText(votes) {
+        var num = Number(votes);
+        if (!num || isNaN(num) || num <= 0) return '';
+        if (num >= 1000000) {
+            return (num / 1000000).toFixed(1).replace(/\.0$/, '') + 'M голосів';
+        }
+        if (num >= 1000) {
+            return (num / 1000).toFixed(1).replace(/\.0$/, '') + 'K голосів';
+        }
+        return Math.round(num) + ' ' + formatVotePlural(num);
+    }
+
+    function formatPillCount(count) {
+        var n = Math.max(0, Math.round(Number(count) || 0));
+        if (n >= 1000000) {
+            return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+        }
+        if (n >= 10000) {
+            return Math.round(n / 1000) + 'K';
+        }
+        return String(n);
+    }
+
+    function normalizeSourceKey(rawSource) {
+        if (!rawSource) return '';
+        var s = String(rawSource).toLowerCase();
+        if (s === 'tomatoesaudience') return 'popcorn';
+        if (s === 'ebert') return 'rogerebert';
+        return s;
+    }
+
+    function parseNumberFromText(str) {
+        if (!str) return 0;
+        var cleaned = String(str).replace(/[\s,\.\u00a0]/g, '');
+        var val = parseInt(cleaned, 10);
+        return isNaN(val) ? 0 : val;
+    }
+
+    function parseHistogramFromHtml(htmlText) {
+        var bars = new Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        var foundCount = 0;
+
+        if (!htmlText || typeof htmlText !== 'string') {
+            return { bars: bars, total: 0 };
+        }
+
+        var attrRegex = /(?:Rating|Рейтинг|Оценка)\s*(10|[1-9])\s*[:\-]\s*([\d\s,\.\u00a0]+)/i;
+
+        try {
+            if (window.DOMParser) {
+                var parser = new DOMParser();
+                var doc = parser.parseFromString(htmlText, 'text/html');
+                var nodes = doc.querySelectorAll('[title], [data-original-title], [data-bs-original-title], [aria-label], [data-tooltip]');
+                var i;
+                for (i = 0; i < nodes.length; i++) {
+                    var el = nodes[i];
+                    var txt = el.getAttribute('data-original-title') ||
+                        el.getAttribute('data-bs-original-title') ||
+                        el.getAttribute('title') ||
+                        el.getAttribute('aria-label') ||
+                        el.getAttribute('data-tooltip') || '';
+                    if (!txt) continue;
+                    var m = txt.match(attrRegex);
+                    if (m) {
+                        var ratingIdx = parseInt(m[1], 10);
+                        var voteVal = parseNumberFromText(m[2]);
+                        if (ratingIdx >= 1 && ratingIdx <= 10 && voteVal > bars[ratingIdx]) {
+                            bars[ratingIdx] = voteVal;
+                            foundCount++;
+                        }
+                    }
+                }
+            }
+        } catch (err) {
+            /* fallback to raw regex */
+        }
+
+        if (foundCount === 0) {
+            var globalRegex = /(?:Rating|Рейтинг|Оценка)\s*(10|[1-9])\s*[:\-]\s*([\d\s,\.\u00a0]+)\s*(?:votes|vote|голос|голоси|голосів)?/gi;
+            var match;
+            while ((match = globalRegex.exec(htmlText)) !== null) {
+                var idx = parseInt(match[1], 10);
+                var v = parseNumberFromText(match[2]);
+                if (idx >= 1 && idx <= 10 && v > bars[idx]) {
+                    bars[idx] = v;
+                }
+            }
+        }
+
+        var total = 0;
+        var k;
+        for (k = 1; k <= 10; k++) {
+            total += bars[k];
+        }
+
+        return { bars: bars, total: total };
+    }
+
+    function computeGaussianReactions(ratings) {
+        var sumWeighted = 0;
+        var sumWeights = 0;
+        var maxVotes = 0;
+        var i;
+
+        for (i = 0; i < ratings.length; i++) {
+            var r = ratings[i];
+            if (!r || r.value === null || r.value === undefined) continue;
+            var key = normalizeSourceKey(r.source);
+            var val = Number(r.value);
+            if (isNaN(val) || val <= 0) continue;
+
+            var score10 = 0;
+            if (key === 'imdb') {
+                score10 = val;
+            } else if (key === 'trakt' || key === 'tmdb' || key === 'popcorn') {
+                score10 = val / 10;
+            } else if (key === 'letterboxd') {
+                score10 = val * 2;
+            } else {
+                continue;
+            }
+
+            var votes = Number(r.votes) || 100;
+            if (votes > maxVotes) maxVotes = votes;
+            var weight = Math.log(votes + 10);
+            sumWeighted += score10 * weight;
+            sumWeights += weight;
+        }
+
+        var mean = sumWeights > 0 ? (sumWeighted / sumWeights) : 7.0;
+        if (mean < 1) mean = 1;
+        if (mean > 10) mean = 10;
+
+        var sigma = 1.65;
+        var dist = new Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        var distSum = 0;
+        var k;
+
+        for (k = 1; k <= 10; k++) {
+            var g = Math.exp(-Math.pow(k - mean, 2) / (2 * sigma * sigma));
+            dist[k] = g;
+            distSum += g;
+        }
+
+        var baseTotal = 600;
+        if (maxVotes > 0) {
+            baseTotal = Math.round(Math.min(2500, Math.max(120, Math.sqrt(maxVotes) * 4)));
+        }
+
+        var bars = new Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        for (k = 1; k <= 10; k++) {
+            bars[k] = Math.round((dist[k] / distSum) * baseTotal);
+        }
+
+        return {
+            masterpiece: bars[9] + bars[10],
+            worth: bars[7] + bars[8],
+            once: bars[5] + bars[6],
+            boring: bars[3] + bars[4],
+            weak: bars[1] + bars[2],
+            isEstimated: true
+        };
+    }
+
+    function barsToReactions(bars) {
+        return {
+            masterpiece: (bars[9] || 0) + (bars[10] || 0),
+            worth: (bars[7] || 0) + (bars[8] || 0),
+            once: (bars[5] || 0) + (bars[6] || 0),
+            boring: (bars[3] || 0) + (bars[4] || 0),
+            weak: (bars[1] || 0) + (bars[2] || 0),
+            isEstimated: false
+        };
+    }
+
+    function resolvePageUrl(json, type) {
+        if (json && json.url) {
+            if (json.url.indexOf('http') === 0) return json.url;
+            if (json.url.indexOf('/') === 0) return 'https://mdblist.com' + json.url;
+            return 'https://mdblist.com/' + json.url;
+        }
+        if (json && json.ids && json.ids.slug) {
+            return 'https://mdblist.com/' + type + '/' + json.ids.slug;
+        }
+        return '';
+    }
+
+    function fetchJson(url) {
+        return fetch(url).then(function(response) {
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+            return response.json();
+        });
+    }
+
+    function fetchText(url) {
+        return fetch(url).then(function(response) {
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+            return response.text();
+        });
+    }
+
+    function fetchMdblistData(movie) {
+        var type = movie.first_air_date ? 'show' : 'movie';
+        var cacheKey = CACHE_PREFIX + type + '_' + movie.id;
+        var cached = readCache(cacheKey);
+
+        if (cached) {
+            return Promise.resolve(cached);
+        }
+
+        var tmdbUrl = 'https://api.mdblist.com/tmdb/' + type + '/' + movie.id + '?apikey=' + MDBLIST_API_KEY;
+        var imdbId = movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
+
+        return fetchJson(tmdbUrl).catch(function() {
+            return null;
+        }).then(function(json) {
+            var hasRatings = json && json.ratings && json.ratings.length > 0;
+            if (!hasRatings && imdbId) {
+                var imdbUrl = 'https://api.mdblist.com/imdb/' + imdbId + '?apikey=' + MDBLIST_API_KEY;
+                return fetchJson(imdbUrl).catch(function() {
+                    return json;
+                });
+            }
+            return json;
+        }).then(function(json) {
+            if (!json || !json.ratings || json.ratings.length === 0) {
+                return null;
+            }
+
+            var pageUrl = resolvePageUrl(json, type);
+            var ratingsCopy = json.ratings;
+
+            if (!pageUrl) {
+                var fallbackOnly = {
+                    ratings: ratingsCopy,
+                    reactions: computeGaussianReactions(ratingsCopy),
+                    pageUrl: ''
+                };
+                writeCache(cacheKey, fallbackOnly);
+                return fallbackOnly;
+            }
+
+            return fetchText(pageUrl).then(function(htmlText) {
+                var parsed = parseHistogramFromHtml(htmlText);
+                var reactions = parsed.total > 0
+                    ? barsToReactions(parsed.bars)
+                    : computeGaussianReactions(ratingsCopy);
+
+                var payload = {
+                    ratings: ratingsCopy,
+                    reactions: reactions,
+                    pageUrl: pageUrl
+                };
+                writeCache(cacheKey, payload);
+                return payload;
+            }).catch(function() {
+                var fallbackPayload = {
+                    ratings: ratingsCopy,
+                    reactions: computeGaussianReactions(ratingsCopy),
+                    pageUrl: pageUrl
+                };
+                writeCache(cacheKey, fallbackPayload);
+                return fallbackPayload;
+            });
+        });
+    }
+
+    function createSvgLogo(sourceKey, value) {
+        var score = Number(value) || 0;
+
+        if (sourceKey === 'imdb') {
+            return '<svg class="mdb-svg" viewBox="0 0 48 48" width="32" height="32">' +
+                '<rect x="2" y="2" width="44" height="44" rx="9" fill="#F5C518"/>' +
+                '<text x="24" y="30" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-weight="900" font-size="17" letter-spacing="-0.8" fill="#121212">IMDb</text>' +
+                '</svg>';
+        }
+
+        if (sourceKey === 'trakt') {
+            var gradId = 'mdb-trakt-grad-' + Math.round(score);
+            return '<svg class="mdb-svg" viewBox="0 0 48 48" width="32" height="32">' +
+                '<defs>' +
+                '<linearGradient id="' + gradId + '" x1="0%" y1="100%" x2="100%" y2="0%">' +
+                '<stop offset="0%" stop-color="#ED1C24"/>' +
+                '<stop offset="100%" stop-color="#AF279C"/>' +
+                '</linearGradient>' +
+                '</defs>' +
+                '<rect x="2" y="2" width="44" height="44" rx="10" fill="url(#' + gradId + ')"/>' +
+                '<path d="M12 24 L20 32 L37 15" fill="none" stroke="#ffffff" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>' +
+                '<path d="M17 35 L39 13" fill="none" stroke="rgba(255,255,255,0.45)" stroke-width="2" stroke-linecap="round"/>' +
+                '</svg>';
+        }
+
+        if (sourceKey === 'tmdb') {
+            return '<svg class="mdb-svg mdb-svg-wide" viewBox="0 0 64 44" width="40" height="30">' +
+                '<defs>' +
+                '<linearGradient id="mdb-tmdb-g" x1="0%" y1="0%" x2="100%" y2="0%">' +
+                '<stop offset="0%" stop-color="#90CEA1"/>' +
+                '<stop offset="100%" stop-color="#01B4E4"/>' +
+                '</linearGradient>' +
+                '</defs>' +
+                '<text x="2" y="13" font-family="Arial, sans-serif" font-weight="800" font-size="11" fill="url(#mdb-tmdb-g)">THE</text>' +
+                '<rect x="29" y="5" width="30" height="8" rx="4" fill="url(#mdb-tmdb-g)"/>' +
+                '<text x="2" y="26" font-family="Arial, sans-serif" font-weight="800" font-size="11.5" fill="url(#mdb-tmdb-g)">MOVIE</text>' +
+                '<rect x="2" y="30" width="29" height="8" rx="4" fill="url(#mdb-tmdb-g)"/>' +
+                '<text x="34" y="38" font-family="Arial, sans-serif" font-weight="800" font-size="11.5" fill="url(#mdb-tmdb-g)">DB</text>' +
+                '</svg>';
+        }
+
+        if (sourceKey === 'letterboxd') {
+            return '<svg class="mdb-svg mdb-svg-wide" viewBox="0 0 58 28" width="38" height="22">' +
+                '<circle cx="13" cy="14" r="9.5" fill="#FF8000"/>' +
+                '<circle cx="29" cy="14" r="9.5" fill="#00E054"/>' +
+                '<circle cx="45" cy="14" r="9.5" fill="#40BCF4"/>' +
+                '<path d="M21 7.6 A9.5 9.5 0 0 1 21 20.4 A9.5 9.5 0 0 1 21 7.6 Z" fill="#B2B500" opacity="0.65"/>' +
+                '<path d="M37 7.6 A9.5 9.5 0 0 1 37 20.4 A9.5 9.5 0 0 1 37 7.6 Z" fill="#00B0B0" opacity="0.65"/>' +
+                '</svg>';
+        }
+
+        if (sourceKey === 'tomatoes') {
+            if (score >= 75) {
+                return '<svg class="mdb-svg" viewBox="0 0 48 48" width="32" height="32">' +
+                    '<circle cx="24" cy="24" r="21" fill="#F9E500" stroke="#008A2E" stroke-width="3"/>' +
+                    '<circle cx="24" cy="25" r="14.5" fill="#FA320A"/>' +
+                    '<path d="M24 9 L26 15 L32 13 L27 18 L24 16 L21 18 L16 13 L22 15 Z" fill="#0AC855"/>' +
+                    '<rect x="11" y="19" width="26" height="10" rx="2.5" fill="#FA320A"/>' +
+                    '<text x="24" y="26.5" text-anchor="middle" font-family="Arial, sans-serif" font-weight="900" font-size="7.5" fill="#FFFFFF">FRESH</text>' +
+                    '</svg>';
+            }
+            if (score >= 60) {
+                return '<svg class="mdb-svg" viewBox="0 0 48 48" width="32" height="32">' +
+                    '<circle cx="24" cy="26" r="17" fill="#FA320A"/>' +
+                    '<ellipse cx="18" cy="20" rx="4" ry="2.2" transform="rotate(-30 18 20)" fill="rgba(255,255,255,0.35)"/>' +
+                    '<path d="M24 6 L27 13 L35 11 L28 16 L24 14 L20 16 L13 11 L21 13 Z" fill="#0AC855"/>' +
+                    '</svg>';
+            }
+            return '<svg class="mdb-svg" viewBox="0 0 48 48" width="32" height="32">' +
+                '<path d="M24 8 L29 15 L38 11 L35 20 L43 24 L35 30 L39 38 L29 35 L24 42 L19 35 L9 38 L13 30 L5 24 L13 20 L10 11 L19 15 Z" fill="#0AC855"/>' +
+                '<circle cx="21" cy="22" r="2.2" fill="#065A26"/>' +
+                '<circle cx="28" cy="27" r="1.8" fill="#065A26"/>' +
+                '</svg>';
+        }
+
+        if (sourceKey === 'popcorn') {
+            if (score >= 60) {
+                return '<svg class="mdb-svg" viewBox="0 0 48 48" width="32" height="32">' +
+                    '<path d="M24 2 L43 11 L43 32 L24 45 L5 32 L5 11 Z" fill="#1AB8B0" opacity="0.28"/>' +
+                    '<circle cx="17" cy="15" r="5" fill="#FFF3B0"/>' +
+                    '<circle cx="24" cy="12" r="5.5" fill="#FFE066"/>' +
+                    '<circle cx="31" cy="15" r="5" fill="#FFF3B0"/>' +
+                    '<polygon points="12,18 36,18 33,42 15,42" fill="#FFFFFF"/>' +
+                    '<polygon points="15,18 20,18 19,42 16,42" fill="#E62E2D"/>' +
+                    '<polygon points="23,18 27,18 26,42 23,42" fill="#E62E2D"/>' +
+                    '<polygon points="30,18 34,18 32,42 29,42" fill="#E62E2D"/>' +
+                    '<rect x="13" y="24" width="22" height="10" rx="2" fill="#FFCC00"/>' +
+                    '<text x="24" y="31.5" text-anchor="middle" font-family="Arial, sans-serif" font-weight="900" font-size="7.5" fill="#B31217">HOT</text>' +
+                    '</svg>';
+            }
+            return '<svg class="mdb-svg" viewBox="0 0 48 48" width="32" height="32">' +
+                '<polygon points="13,18 35,18 32,42 16,42" fill="#89A894"/>' +
+                '<polygon points="17,18 22,18 21,42 18,42" fill="#3B6E4C"/>' +
+                '<polygon points="26,18 31,18 30,42 27,42" fill="#3B6E4C"/>' +
+                '<circle cx="20" cy="15" r="4.5" fill="#C9D6B8"/>' +
+                '<circle cx="28" cy="16" r="4.5" fill="#B6C7A3"/>' +
+                '</svg>';
+        }
+
+        if (sourceKey === 'metacritic') {
+            return '<svg class="mdb-svg" viewBox="0 0 48 48" width="32" height="32">' +
+                '<circle cx="24" cy="20" r="15" fill="#1B1D22" stroke="#D4AF37" stroke-width="2.5"/>' +
+                '<text x="24" y="25" text-anchor="middle" font-family="Arial, sans-serif" font-weight="900" font-size="16" fill="#FFCC33" transform="rotate(-18 24 20)">m</text>' +
+                '<rect x="7" y="29" width="34" height="11" rx="2.5" fill="#D4AF37"/>' +
+                '<text x="24" y="37" text-anchor="middle" font-family="Arial, sans-serif" font-weight="900" font-size="6.8" fill="#111111">METACRITIC</text>' +
+                '</svg>';
+        }
+
+        if (sourceKey === 'rogerebert') {
+            return '<svg class="mdb-svg" viewBox="0 0 48 48" width="28" height="28">' +
+                '<path d="M12 22 H17 V40 H12 C10.3 40 9 38.7 9 37 V25 C9 23.3 10.3 22 12 22 Z" fill="#FFFFFF"/>' +
+                '<path d="M20 21 L25.5 9.5 C26.3 7.8 28.4 7.2 30 8.1 C31.4 8.9 32 10.6 31.4 12.1 L29.2 18 H37.5 C39.8 18 41.5 20.1 41.1 22.4 L38.9 36.4 C38.5 38.5 36.7 40 34.6 40 H20 V21 Z" fill="#FFFFFF"/>' +
+                '</svg>';
+        }
+
+        return '';
+    }
+
+    function createTextBadge(sourceKey) {
+        var map = {
+            imdb: { label: 'IMDb', bg: '#F5C518', fg: '#111111' },
+            trakt: { label: 'TRAKT', bg: '#ED1C24', fg: '#FFFFFF' },
+            tmdb: { label: 'TMDB', bg: '#01B4E4', fg: '#FFFFFF' },
+            letterboxd: { label: 'LBXD', bg: '#00E054', fg: '#111111' },
+            tomatoes: { label: 'RT', bg: '#FA320A', fg: '#FFFFFF' },
+            popcorn: { label: 'POP', bg: '#FFCC00', fg: '#111111' },
+            metacritic: { label: 'MC', bg: '#D4AF37', fg: '#111111' },
+            rogerebert: { label: 'EBERT', bg: '#3C404B', fg: '#FFFFFF' }
+        };
+        var info = map[sourceKey] || { label: sourceKey.toUpperCase(), bg: '#444', fg: '#FFF' };
+        return '<span class="mdb-text-badge" style="background:' + info.bg + ';color:' + info.fg + ';">' + info.label + '</span>';
+    }
+
+    function formatRatingParts(sourceKey, r) {
+        var val = Number(r.value);
+        if (sourceKey === 'imdb') {
+            return { score: val.toFixed(1), denom: '/10' };
+        }
+        if (sourceKey === 'trakt') {
+            return { score: String(Math.round(val)), denom: '%' };
+        }
+        if (sourceKey === 'tmdb') {
+            return { score: String(Math.round(val)), denom: '/100' };
+        }
+        if (sourceKey === 'letterboxd') {
+            return { score: val.toFixed(1), denom: '/5' };
+        }
+        if (sourceKey === 'tomatoes') {
+            return { score: String(Math.round(val)), denom: '%' };
+        }
+        if (sourceKey === 'popcorn') {
+            return { score: String(Math.round(val)), denom: '%' };
+        }
+        if (sourceKey === 'metacritic') {
+            return { score: String(Math.round(val)), denom: '/100' };
+        }
+        if (sourceKey === 'rogerebert') {
+            return { score: val.toFixed(1), denom: '/4' };
+        }
+        return { score: String(val), denom: '' };
+    }
+
+    function getUserVote(mediaVoteKey) {
+        if (!window.Lampa || !Lampa.Storage) return '';
+        return getStorageStr(VOTE_PREFIX + mediaVoteKey, '');
+    }
+
+    function setUserVote(mediaVoteKey, reactionKey) {
+        if (!window.Lampa || !Lampa.Storage) return;
+        if (reactionKey) {
+            Lampa.Storage.set(VOTE_PREFIX + mediaVoteKey, reactionKey);
         } else {
-            Lampa.Manifest.plugins.mdblist_reactions = meta;
+            Lampa.Storage.remove(VOTE_PREFIX + mediaVoteKey);
         }
     }
 
@@ -50,705 +600,555 @@
         if (document.getElementById(STYLE_ID)) return;
 
         var css = '' +
-            '.mdblist-rc-hidden-orig { display: none !important; }' +
-            '.mdblist-rc-root {' +
-            '    display: block;' +
-            '    width: 100%;' +
-            '    margin: 0.9em 0 1.2em 0;' +
-            '    overflow: visible;' +
-            '    position: relative;' +
-            '    z-index: 3;' +
+            '.mdb-reactions-wrapper {' +
+            '  display: block;' +
+            '  width: 100%;' +
+            '  margin: 0.7em 0 1.1em 0;' +
+            '  transform-origin: left top;' +
+            '  box-sizing: border-box;' +
             '}' +
-            '.mdblist-rc-pills {' +
-            '    display: flex;' +
-            '    flex-wrap: wrap;' +
-            '    align-items: center;' +
-            '    gap: 0.65em;' +
-            '    margin-bottom: 1.15em;' +
-            '    overflow: visible;' +
+            '.mdb-reactions-wrapper.mdb-scale-085 { zoom: 0.85; }' +
+            '.mdb-reactions-wrapper.mdb-scale-10 { zoom: 1; }' +
+            '.mdb-reactions-wrapper.mdb-scale-115 { zoom: 1.15; }' +
+
+            '.mdb-pills-row {' +
+            '  display: flex;' +
+            '  flex-wrap: wrap;' +
+            '  align-items: center;' +
+            '  gap: 0.6em;' +
+            '  margin-bottom: 0.9em;' +
             '}' +
-            '.mdblist-rc-pill {' +
-            '    position: relative;' +
-            '    display: inline-flex;' +
-            '    align-items: center;' +
-            '    gap: 0.5em;' +
-            '    background: rgba(32, 34, 38, 0.78);' +
-            '    backdrop-filter: blur(10px);' +
-            '    -webkit-backdrop-filter: blur(10px);' +
-            '    border-radius: 999px;' +
-            '    padding: 0.4em 0.9em;' +
-            '    border: 1.5px solid rgba(255, 255, 255, 0.08);' +
-            '    cursor: pointer;' +
-            '    user-select: none;' +
-            '    -webkit-user-select: none;' +
-            '    transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;' +
-            '    outline: none;' +
+
+            '.mdb-pill {' +
+            '  position: relative;' +
+            '  display: inline-flex;' +
+            '  align-items: center;' +
+            '  gap: 0.45em;' +
+            '  padding: 0.42em 0.95em;' +
+            '  border-radius: 999px;' +
+            '  cursor: pointer;' +
+            '  user-select: none;' +
+            '  transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;' +
+            '  color: #ffffff;' +
+            '  font-size: 1.05em;' +
+            '  font-weight: 600;' +
+            '  border: 1px solid rgba(255, 255, 255, 0.12);' +
             '}' +
-            '.mdblist-rc-pill:hover,' +
-            '.mdblist-rc-pill.focus {' +
-            '    background: rgba(50, 54, 62, 0.92);' +
-            '    border-color: rgba(255, 255, 255, 0.55);' +
-            '    transform: translateY(-1px);' +
+
+            '.mdb-style-glass .mdb-pill {' +
+            '  background: rgba(255, 255, 255, 0.11);' +
+            '  backdrop-filter: blur(8px);' +
+            '  -webkit-backdrop-filter: blur(8px);' +
             '}' +
-            '.mdblist-rc-pill.is-active {' +
-            '    border-color: #ffffff;' +
-            '    background: rgba(54, 58, 68, 0.94);' +
-            '    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 4px 12px rgba(0, 0, 0, 0.35);' +
+            '.mdb-style-solid .mdb-pill {' +
+            '  background: #23252c;' +
+            '  border-color: rgba(255, 255, 255, 0.1);' +
             '}' +
-            '.mdblist-rc-emoji {' +
-            '    font-size: 1.3em;' +
-            '    line-height: 1;' +
-            '    display: inline-flex;' +
-            '    align-items: center;' +
-            '    justify-content: center;' +
+            '.mdb-style-outline .mdb-pill {' +
+            '  background: rgba(0, 0, 0, 0.18);' +
+            '  border: 1.5px solid rgba(255, 255, 255, 0.28);' +
             '}' +
-            '.mdblist-rc-count {' +
-            '    font-size: 1.02em;' +
-            '    font-weight: 700;' +
-            '    color: #ffffff;' +
-            '    line-height: 1;' +
-            '    letter-spacing: 0.01em;' +
+            '.mdb-style-compact .mdb-pill {' +
+            '  background: rgba(255, 255, 255, 0.1);' +
+            '  padding: 0.28em 0.72em;' +
+            '  font-size: 0.92em;' +
+            '  gap: 0.35em;' +
             '}' +
-            '.mdblist-rc-tooltip {' +
-            '    position: absolute;' +
-            '    left: 50%;' +
-            '    bottom: calc(100% + 0.55em);' +
-            '    transform: translateX(-50%) translateY(4px);' +
-            '    background: rgba(24, 26, 30, 0.95);' +
-            '    color: #ffffff;' +
-            '    font-size: 0.8em;' +
-            '    font-weight: 600;' +
-            '    line-height: 1.2;' +
-            '    padding: 0.38em 0.72em;' +
-            '    border-radius: 0.5em;' +
-            '    border: 1px solid rgba(255, 255, 255, 0.16);' +
-            '    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);' +
-            '    white-space: nowrap;' +
-            '    pointer-events: none;' +
-            '    opacity: 0;' +
-            '    visibility: hidden;' +
-            '    transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s ease;' +
-            '    z-index: 25;' +
+
+            '.mdb-pill.focus, .mdb-pill:hover {' +
+            '  transform: scale(1.06);' +
+            '  background: rgba(255, 255, 255, 0.24);' +
+            '  border-color: rgba(255, 255, 255, 0.85);' +
+            '  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);' +
             '}' +
-            '.mdblist-rc-tooltip:after {' +
-            '    content: "";' +
-            '    position: absolute;' +
-            '    top: 100%;' +
-            '    left: 50%;' +
-            '    margin-left: -4px;' +
-            '    border-width: 4px;' +
-            '    border-style: solid;' +
-            '    border-color: rgba(24, 26, 30, 0.95) transparent transparent transparent;' +
+            '.mdb-pill.active {' +
+            '  background: rgba(255, 255, 255, 0.26);' +
+            '  border-color: #ffffff;' +
+            '  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);' +
             '}' +
-            '.mdblist-rc-pill:hover .mdblist-rc-tooltip,' +
-            '.mdblist-rc-pill.focus .mdblist-rc-tooltip {' +
-            '    opacity: 1;' +
-            '    visibility: visible;' +
-            '    transform: translateX(-50%) translateY(0);' +
+
+            '.mdb-pill-emoji {' +
+            '  font-size: 1.18em;' +
+            '  line-height: 1;' +
             '}' +
-            '.mdblist-rc-ratings {' +
-            '    display: flex;' +
-            '    flex-wrap: wrap;' +
-            '    align-items: flex-start;' +
-            '    gap: 1.1em 2.1em;' +
+            '.mdb-pill-count {' +
+            '  font-variant-numeric: tabular-nums;' +
+            '  letter-spacing: 0.01em;' +
             '}' +
-            '.mdblist-rc-rating-item {' +
-            '    display: flex;' +
-            '    flex-direction: column;' +
-            '    align-items: flex-start;' +
+
+            '.mdb-pill-tooltip {' +
+            '  position: absolute;' +
+            '  bottom: calc(100% + 7px);' +
+            '  left: 50%;' +
+            '  transform: translateX(-50%) translateY(4px);' +
+            '  background: rgba(20, 22, 27, 0.96);' +
+            '  color: #ffffff;' +
+            '  border: 1px solid rgba(255, 255, 255, 0.18);' +
+            '  border-radius: 6px;' +
+            '  padding: 0.25em 0.6em;' +
+            '  font-size: 0.78em;' +
+            '  font-weight: 500;' +
+            '  white-space: nowrap;' +
+            '  pointer-events: none;' +
+            '  opacity: 0;' +
+            '  transition: opacity 0.15s ease, transform 0.15s ease;' +
+            '  z-index: 20;' +
             '}' +
-            '.mdblist-rc-rating-top {' +
-            '    display: flex;' +
-            '    align-items: center;' +
-            '    gap: 0.55em;' +
+            '.mdb-pill.focus .mdb-pill-tooltip, .mdb-pill:hover .mdb-pill-tooltip {' +
+            '  opacity: 1;' +
+            '  transform: translateX(-50%) translateY(0);' +
             '}' +
-            '.mdblist-rc-icon {' +
-            '    width: 1.95em;' +
-            '    height: 1.95em;' +
-            '    display: inline-flex;' +
-            '    align-items: center;' +
-            '    justify-content: center;' +
-            '    flex-shrink: 0;' +
+
+            '.mdb-ratings-row {' +
+            '  display: flex;' +
+            '  flex-wrap: wrap;' +
+            '  align-items: flex-start;' +
+            '  gap: 0.85em 1.45em;' +
             '}' +
-            '.mdblist-rc-icon svg {' +
-            '    width: 100%;' +
-            '    height: 100%;' +
-            '    display: block;' +
+
+            '.mdb-rating-item {' +
+            '  display: inline-flex;' +
+            '  flex-direction: column;' +
+            '  align-items: flex-start;' +
             '}' +
-            '.mdblist-rc-score-wrap {' +
-            '    display: inline-flex;' +
-            '    align-items: baseline;' +
-            '    line-height: 1;' +
+
+            '.mdb-rating-top {' +
+            '  display: inline-flex;' +
+            '  align-items: center;' +
+            '  gap: 0.5em;' +
             '}' +
-            '.mdblist-rc-score {' +
-            '    font-size: 1.55em;' +
-            '    font-weight: 800;' +
-            '    color: #ffffff;' +
-            '    letter-spacing: -0.02em;' +
+
+            '.mdb-badge-icon {' +
+            '  display: inline-flex;' +
+            '  align-items: center;' +
+            '  justify-content: center;' +
+            '  flex-shrink: 0;' +
             '}' +
-            '.mdblist-rc-denom {' +
-            '    font-size: 0.88em;' +
-            '    font-weight: 500;' +
-            '    color: rgba(255, 255, 255, 0.52);' +
-            '    margin-left: 0.14em;' +
+            '.mdb-badges-monochrome .mdb-badge-icon {' +
+            '  filter: grayscale(100%) contrast(1.15) opacity(0.85);' +
             '}' +
-            '.mdblist-rc-votes {' +
-            '    font-size: 0.84em;' +
-            '    font-weight: 400;' +
-            '    color: rgba(255, 255, 255, 0.52);' +
-            '    margin-top: 0.34em;' +
-            '    white-space: nowrap;' +
+            '.mdb-svg {' +
+            '  display: block;' +
             '}' +
-            '@media screen and (max-width: 767px) {' +
-            '    .mdblist-rc-pills { gap: 0.45em; }' +
-            '    .mdblist-rc-pill { padding: 0.35em 0.72em; }' +
-            '    .mdblist-rc-ratings { gap: 0.9em 1.35em; }' +
-            '    .mdblist-rc-score { font-size: 1.35em; }' +
+            '.mdb-text-badge {' +
+            '  display: inline-block;' +
+            '  padding: 0.22em 0.52em;' +
+            '  border-radius: 5px;' +
+            '  font-size: 0.78em;' +
+            '  font-weight: 800;' +
+            '  letter-spacing: 0.03em;' +
+            '  line-height: 1.15;' +
+            '}' +
+
+            '.mdb-score-group {' +
+            '  display: inline-flex;' +
+            '  align-items: baseline;' +
+            '  line-height: 1;' +
+            '}' +
+            '.mdb-score-val {' +
+            '  color: #ffffff;' +
+            '  font-size: 1.42em;' +
+            '  font-weight: 800;' +
+            '  letter-spacing: -0.02em;' +
+            '}' +
+            '.mdb-score-denom {' +
+            '  color: rgba(255, 255, 255, 0.52);' +
+            '  font-size: 0.92em;' +
+            '  font-weight: 500;' +
+            '  margin-left: 0.12em;' +
+            '}' +
+
+            '.mdb-votes-sub {' +
+            '  margin-top: 0.28em;' +
+            '  color: rgba(255, 255, 255, 0.55);' +
+            '  font-size: 0.8em;' +
+            '  font-weight: 400;' +
+            '  line-height: 1.1;' +
             '}';
 
-        var style = document.createElement('style');
-        style.id = STYLE_ID;
-        style.type = 'text/css';
-        style.appendChild(document.createTextNode(css));
-        document.head.appendChild(style);
+        var styleEl = document.createElement('style');
+        styleEl.id = STYLE_ID;
+        styleEl.type = 'text/css';
+        styleEl.appendChild(document.createTextNode(css));
+        document.head.appendChild(styleEl);
     }
 
-    function formatCompact(num) {
-        var n = Math.max(0, Math.round(Number(num) || 0));
-        if (n >= 1000000) {
-            return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
-        }
-        if (n >= 1000) {
-            return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
-        }
-        return String(n);
-    }
+    function buildWrapperElement(data, movie, settings) {
+        var type = movie.first_air_date ? 'show' : 'movie';
+        var mediaVoteKey = type + '_' + movie.id;
+        var currentVote = getUserVote(mediaVoteKey);
 
-    function formatVotesLabel(num) {
-        var n = Math.max(0, Math.round(Number(num) || 0));
-        if (n >= 1000) {
-            return formatCompact(n) + ' голосів';
-        }
-        var mod10 = n % 10;
-        var mod100 = n % 100;
-        if (mod10 === 1 && mod100 !== 11) {
-            return n + ' голос';
-        }
-        if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
-            return n + ' голоси';
-        }
-        return n + ' голосів';
-    }
+        var wrapper = document.createElement('div');
+        var scaleClass = 'mdb-scale-10';
+        if (settings.scale === '0.85') scaleClass = 'mdb-scale-085';
+        if (settings.scale === '1.15') scaleClass = 'mdb-scale-115';
 
-    function buildPlatformIcon(source, numericValue) {
-        svgUid += 1;
-        var uid = svgUid;
+        wrapper.className = 'mdb-reactions-wrapper mdb-style-' + settings.pillStyle +
+            ' mdb-badges-' + settings.badgeStyle + ' ' + scaleClass;
 
-        if (source === 'imdb') {
-            return '' +
-                '<svg viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">' +
-                '    <rect x="1" y="1" width="34" height="34" rx="6" fill="#F5C518"/>' +
-                '    <text x="18" y="23.5" text-anchor="middle" fill="#000000" font-family="Impact, \'Arial Narrow\', Arial, sans-serif" font-weight="900" font-size="14" letter-spacing="-0.4">IMDb</text>' +
-                '</svg>';
-        }
+        if (settings.showPills && data.reactions) {
+            var pillsRow = document.createElement('div');
+            pillsRow.className = 'mdb-pills-row';
+            var lastTapTs = 0;
 
-        if (source === 'trakt') {
-            var gradId = 'mdblist-trakt-' + uid;
-            return '' +
-                '<svg viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">' +
-                '    <defs>' +
-                '        <linearGradient id="' + gradId + '" x1="0%" y1="0%" x2="100%" y2="100%">' +
-                '            <stop offset="0%" stop-color="#9B30B6"/>' +
-                '            <stop offset="55%" stop-color="#E61E3C"/>' +
-                '            <stop offset="100%" stop-color="#FF2E2E"/>' +
-                '        </linearGradient>' +
-                '    </defs>' +
-                '    <rect x="1" y="1" width="34" height="34" rx="8" fill="url(#' + gradId + ')"/>' +
-                '    <rect x="6.5" y="6.5" width="23" height="23" rx="5.5" fill="none" stroke="rgba(255,255,255,0.85)" stroke-width="1.6"/>' +
-                '    <path d="M11.5 19.5 L16.2 24.2 L26 12.2" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>' +
-                '    <path d="M11.5 14.8 L16.2 19.5 L23.5 10.6" fill="none" stroke="rgba(255,255,255,0.8)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>' +
-                '</svg>';
-        }
+            var createPill = function(def) {
+                var baseCount = Number(data.reactions[def.key]) || 0;
+                var isSelected = (currentVote === def.key);
+                var pill = document.createElement('div');
+                pill.className = 'mdb-pill selector' + (isSelected ? ' active' : '');
+                pill.setAttribute('data-reaction-key', def.key);
 
-        if (source === 'tmdb') {
-            var tmdbGrad = 'mdblist-tmdb-' + uid;
-            return '' +
-                '<svg viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">' +
-                '    <defs>' +
-                '        <linearGradient id="' + tmdbGrad + '" x1="0%" y1="0%" x2="100%" y2="0%">' +
-                '            <stop offset="0%" stop-color="#90CEA1"/>' +
-                '            <stop offset="100%" stop-color="#01B4E4"/>' +
-                '        </linearGradient>' +
-                '    </defs>' +
-                '    <text x="2" y="11" fill="url(#' + tmdbGrad + ')" font-family="Arial, sans-serif" font-weight="900" font-size="8.2">THE</text>' +
-                '    <rect x="20.5" y="5.2" width="13.5" height="6" rx="3" fill="#01B4E4"/>' +
-                '    <text x="2" y="21" fill="url(#' + tmdbGrad + ')" font-family="Arial, sans-serif" font-weight="900" font-size="9.2" letter-spacing="-0.2">MOVIE</text>' +
-                '    <text x="2" y="31" fill="url(#' + tmdbGrad + ')" font-family="Arial, sans-serif" font-weight="900" font-size="9.5">DB</text>' +
-                '    <rect x="17.5" y="24.5" width="16.5" height="6.2" rx="3.1" fill="url(#' + tmdbGrad + ')"/>' +
-                '</svg>';
-        }
+                var tooltip = document.createElement('span');
+                tooltip.className = 'mdb-pill-tooltip';
+                tooltip.textContent = def.label;
 
-        if (source === 'tomatoes') {
-            if (numericValue >= 60) {
-                return '' +
-                    '<svg viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">' +
-                    '    <circle cx="18" cy="18" r="16" fill="#189B38"/>' +
-                    '    <circle cx="18" cy="19.2" r="11.8" fill="#FA320A"/>' +
-                    '    <ellipse cx="14" cy="15" rx="3" ry="1.8" transform="rotate(-25 14 15)" fill="rgba(255,255,255,0.35)"/>' +
-                    '    <path d="M18 7.5 C16.2 4.5, 13.5 5.2, 13 7.5 C15 7.8, 16.5 8.5, 18 9.2 C19.5 8.5, 21 7.8, 23 7.5 C22.5 5.2, 19.8 4.5, 18 7.5 Z" fill="#23B54B"/>' +
-                    '    <path d="M18 6 L18 10.5 M14.5 8 L18 10.5 L21.5 8" stroke="#137A2D" stroke-width="1.3" stroke-linecap="round"/>' +
-                    '    <rect x="6.5" y="15.2" width="23" height="7" rx="2" fill="#FFF3B0"/>' +
-                    '    <text x="18" y="20.6" text-anchor="middle" fill="#D92200" font-family="Arial, sans-serif" font-weight="900" font-size="5.6" letter-spacing="0.2">FRESH</text>' +
-                    '</svg>';
-            }
-            return '' +
-                '<svg viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">' +
-                '    <path d="M18 4 C21 7, 26 5, 28 9 C32 10, 31 15, 34 18 C30 21, 32 26, 27 28 C25 32, 20 30, 17 33 C14 29, 9 32, 7 27 C3 24, 5 19, 2 16 C6 13, 4 8, 9 7 C11 3, 15 6, 18 4 Z" fill="#63B82B"/>' +
-                '    <circle cx="15" cy="15" r="2.2" fill="#9EE05A"/>' +
-                '    <circle cx="22" cy="21" r="1.5" fill="#9EE05A"/>' +
-                '</svg>';
-        }
+                var emojiEl = document.createElement('span');
+                emojiEl.className = 'mdb-pill-emoji';
+                emojiEl.textContent = def.emoji;
 
-        if (source === 'popcorn') {
-            return '' +
-                '<svg viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">' +
-                '    <circle cx="12" cy="10.5" r="4.2" fill="#FFD633"/>' +
-                '    <circle cx="18" cy="8.5" r="4.6" fill="#FFE45E"/>' +
-                '    <circle cx="24" cy="10.5" r="4.2" fill="#FFC414"/>' +
-                '    <circle cx="14.5" cy="12.5" r="3.6" fill="#FFF08A"/>' +
-                '    <circle cx="21.5" cy="12.5" r="3.6" fill="#FFD633"/>' +
-                '    <polygon points="8,13.5 28,13.5 25,33 11,33" fill="#FFFFFF"/>' +
-                '    <polygon points="8,13.5 12.2,13.5 14,33 11,33" fill="#E62424"/>' +
-                '    <polygon points="16,13.5 20,13.5 19.6,33 16.4,33" fill="#E62424"/>' +
-                '    <polygon points="23.8,13.5 28,13.5 25,33 22,33" fill="#E62424"/>' +
-                '    <rect x="7" y="12.5" width="22" height="2.4" rx="1" fill="#D11919"/>' +
-                '</svg>';
-        }
+                var countEl = document.createElement('span');
+                countEl.className = 'mdb-pill-count';
+                countEl.textContent = formatPillCount(baseCount + (isSelected ? 1 : 0));
 
-        return '' +
-            '<svg viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">' +
-            '    <circle cx="18" cy="18" r="16" fill="#FFCC34"/>' +
-            '    <text x="18" y="24" text-anchor="middle" fill="#000000" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="20" transform="rotate(-14 18 18)">m</text>' +
-            '</svg>';
-    }
+                pill.appendChild(tooltip);
+                pill.appendChild(emojiEl);
+                pill.appendChild(countEl);
 
-    function normalizeRatings(apiData, movie) {
-        var map = {};
-        var list = (apiData && apiData.ratings && typeof apiData.ratings.length === 'number') ? apiData.ratings : new Array();
+                var handleToggle = function(ev) {
+                    if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
+                    var now = new Date().getTime();
+                    if (now - lastTapTs < 260) return;
+                    lastTapTs = now;
 
-        for (var i = 0; i < list.length; i++) {
-            var item = list[i];
-            if (!item || !item.source) continue;
-            var src = String(item.source).toLowerCase();
-            if (PLATFORM_ORDER.indexOf(src) === -1) continue;
+                    var prevVote = getUserVote(mediaVoteKey);
+                    var nextVote = (prevVote === def.key) ? '' : def.key;
+                    setUserVote(mediaVoteKey, nextVote);
 
-            var val = item.value;
-            var score = item.score;
-            if ((val === null || typeof val === 'undefined') && (score === null || typeof score === 'undefined')) continue;
-
-            var numVal = Number(val);
-            if (isNaN(numVal) || numVal <= 0) {
-                numVal = Number(score);
-            }
-            if (isNaN(numVal) || numVal <= 0) continue;
-
-            var votes = Number(item.votes) || 0;
-
-            if (src === 'imdb') {
-                if (numVal > 10) numVal = numVal / 10;
-                map[src] = {
-                    source: src,
-                    displayScore: numVal.toFixed(1),
-                    denom: '/10',
-                    numeric100: numVal * 10,
-                    rating10: numVal,
-                    votes: votes
-                };
-            } else if (src === 'trakt' || src === 'tomatoes' || src === 'popcorn') {
-                if (numVal <= 10 && score && Number(score) > 10) numVal = Number(score);
-                var pct = Math.round(numVal);
-                map[src] = {
-                    source: src,
-                    displayScore: String(pct),
-                    denom: '%',
-                    numeric100: pct,
-                    rating10: pct / 10,
-                    votes: votes
-                };
-            } else if (src === 'tmdb' || src === 'metacritic') {
-                if (src === 'tmdb' && numVal <= 10) {
-                    numVal = (score && Number(score) > 10) ? Number(score) : Math.round(numVal * 10);
-                }
-                var out100 = Math.round(numVal);
-                map[src] = {
-                    source: src,
-                    displayScore: String(out100),
-                    denom: '/100',
-                    numeric100: out100,
-                    rating10: out100 / 10,
-                    votes: votes
-                };
-            }
-        }
-
-        if (!map.tmdb && movie && Number(movie.vote_average) > 0) {
-            var tmdbAvg = Number(movie.vote_average);
-            var tmdb100 = Math.round(tmdbAvg * 10);
-            map.tmdb = {
-                source: 'tmdb',
-                displayScore: String(tmdb100),
-                denom: '/100',
-                numeric100: tmdb100,
-                rating10: tmdbAvg,
-                votes: Number(movie.vote_count) || 0
-            };
-        }
-
-        return map;
-    }
-
-    function computeGaussianReactions(ratingsMap, movie) {
-        var userSources = new Array('imdb', 'trakt', 'tmdb', 'popcorn');
-        var weightedSum = 0;
-        var weightTotal = 0;
-        var totalVotes = 0;
-        var hasWeightedVotes = false;
-        var fallbackRatingSum = 0;
-        var fallbackRatingCount = 0;
-
-        for (var i = 0; i < userSources.length; i++) {
-            var entry = ratingsMap[userSources[i]];
-            if (!entry || !(entry.rating10 > 0)) continue;
-            fallbackRatingSum += entry.rating10;
-            fallbackRatingCount += 1;
-            if (entry.votes > 0) {
-                hasWeightedVotes = true;
-                weightedSum += entry.rating10 * entry.votes;
-                weightTotal += entry.votes;
-                totalVotes += entry.votes;
-            }
-        }
-
-        var mu = 0;
-        if (hasWeightedVotes && weightTotal > 0) {
-            mu = weightedSum / weightTotal;
-        } else if (fallbackRatingCount > 0) {
-            mu = fallbackRatingSum / fallbackRatingCount;
-            totalVotes = Number(movie && movie.vote_count) || 0;
-        } else {
-            mu = Number(movie && movie.vote_average) || 0;
-            totalVotes = Number(movie && movie.vote_count) || 0;
-        }
-
-        if (mu < 1) mu = 1;
-        if (mu > 10) mu = 10;
-
-        var counts = {
-            fire: 0,
-            like: 0,
-            meh: 0,
-            sleep: 0,
-            poop: 0
-        };
-
-        if (totalVotes <= 0) {
-            return counts;
-        }
-
-        var scoreWeights = new Array();
-        var weightSum10 = 0;
-        for (var s = 1; s <= 10; s++) {
-            var z = (s - mu) / GAUSSIAN_SIGMA;
-            var w = Math.exp(-0.5 * z * z);
-            scoreWeights.push(w);
-            weightSum10 += w;
-        }
-
-        var bucketsRaw = {
-            poop: (scoreWeights[0] + scoreWeights[1]) / weightSum10 * totalVotes,
-            sleep: (scoreWeights[2] + scoreWeights[3]) / weightSum10 * totalVotes,
-            meh: (scoreWeights[4] + scoreWeights[5]) / weightSum10 * totalVotes,
-            like: (scoreWeights[6] + scoreWeights[7]) / weightSum10 * totalVotes,
-            fire: (scoreWeights[8] + scoreWeights[9]) / weightSum10 * totalVotes
-        };
-
-        var keys = new Array('fire', 'like', 'meh', 'sleep', 'poop');
-        var roundedSum = 0;
-        var maxKey = 'like';
-        var maxVal = -1;
-
-        for (var k = 0; k < keys.length; k++) {
-            var key = keys[k];
-            var rounded = Math.round(bucketsRaw[key]);
-            counts[key] = rounded;
-            roundedSum += rounded;
-            if (bucketsRaw[key] > maxVal) {
-                maxVal = bucketsRaw[key];
-                maxKey = key;
-            }
-        }
-
-        var diff = Math.round(totalVotes) - roundedSum;
-        if (diff !== 0 && counts[maxKey] + diff >= 0) {
-            counts[maxKey] += diff;
-        }
-
-        return counts;
-    }
-
-    function getUserVote(movieId) {
-        if (!window.Lampa || !Lampa.Storage) return '';
-        return Lampa.Storage.get('mdblist_user_vote_' + movieId, '');
-    }
-
-    function setUserVote(movieId, reactionKey) {
-        if (!window.Lampa || !Lampa.Storage) return;
-        Lampa.Storage.set('mdblist_user_vote_' + movieId, reactionKey || '');
-    }
-
-    function readCachedMdblist(cacheKey) {
-        if (!window.Lampa || !Lampa.Storage) return null;
-        var now = Date.now();
-        var maxMs = CACHE_MINUTES * 60 * 1000;
-        var cached = null;
-
-        if (typeof Lampa.Storage.cache === 'function') {
-            cached = Lampa.Storage.cache(cacheKey, CACHE_MINUTES, {});
-            if (cached && cached._ts && (now - cached._ts < maxMs) && cached.ratings) {
-                return cached;
-            }
-        }
-
-        var raw = Lampa.Storage.get(cacheKey, null);
-        if (raw && raw.value && raw.value._ts && (now - raw.value._ts < maxMs) && raw.value.ratings) {
-            return raw.value;
-        }
-        return null;
-    }
-
-    function writeCachedMdblist(cacheKey, data) {
-        if (!window.Lampa || !Lampa.Storage || !data) return;
-        data._ts = Date.now();
-        Lampa.Storage.set(cacheKey, {
-            time: data._ts,
-            value: data
-        });
-    }
-
-    function fetchMdblistData(movie, callback) {
-        if (!movie || !movie.id) {
-            callback(null);
-            return;
-        }
-
-        var mediaType = movie.first_air_date ? 'show' : 'movie';
-        var cacheKey = 'mdblist_data_v1_' + mediaType + '_' + movie.id;
-        var cached = readCachedMdblist(cacheKey);
-        if (cached) {
-            callback(cached);
-            return;
-        }
-
-        var url = 'https://api.mdblist.com/tmdb/' + mediaType + '/' + encodeURIComponent(String(movie.id)) + '?apikey=' + encodeURIComponent(MDBLIST_API_KEY);
-        var net = new Lampa.Reguest();
-        net.silent(
-            url,
-            function(response) {
-                var parsed = response;
-                if (typeof parsed === 'string') {
-                    try {
-                        parsed = JSON.parse(parsed);
-                    } catch (err) {
-                        parsed = null;
+                    var allPills = pillsRow.querySelectorAll('.mdb-pill');
+                    var j;
+                    for (j = 0; j < allPills.length; j++) {
+                        var p = allPills[j];
+                        var pKey = p.getAttribute('data-reaction-key');
+                        var pBase = Number(data.reactions[pKey]) || 0;
+                        var pActive = (nextVote === pKey);
+                        if (pActive) {
+                            p.classList.add('active');
+                        } else {
+                            p.classList.remove('active');
+                        }
+                        var cntSpan = p.querySelector('.mdb-pill-count');
+                        if (cntSpan) {
+                            cntSpan.textContent = formatPillCount(pBase + (pActive ? 1 : 0));
+                        }
                     }
-                }
-                if (parsed && typeof parsed === 'object' && parsed.ratings) {
-                    writeCachedMdblist(cacheKey, parsed);
-                    callback(parsed);
+                };
+
+                pill.addEventListener('click', handleToggle);
+                if (window.$) {
+                    window.$(pill).on('hover:enter', handleToggle);
                 } else {
-                    callback(null);
+                    pill.addEventListener('hover:enter', handleToggle);
                 }
-            },
-            function() {
-                callback(null);
+
+                return pill;
+            };
+
+            var i;
+            for (i = 0; i < REACTION_DEFS.length; i++) {
+                pillsRow.appendChild(createPill(REACTION_DEFS[i]));
             }
-        );
-    }
-
-    function buildReactionsDOM(movieId, baseCounts) {
-        var userVote = getUserVote(movieId);
-        var $pills = $('<div class="mdblist-rc-pills"></div>');
-        var lastTrigger = 0;
-
-        for (var i = 0; i < REACTION_DEFS.length; i++) {
-            (function(def) {
-                var count = (baseCounts[def.key] || 0) + (userVote === def.key ? 1 : 0);
-                var $pill = $(
-                    '<div class="mdblist-rc-pill selector" data-reaction="' + def.key + '" title="' + def.tooltip + '">' +
-                    '    <span class="mdblist-rc-tooltip">' + def.tooltip + '</span>' +
-                    '    <span class="mdblist-rc-emoji">' + def.emoji + '</span>' +
-                    '    <span class="mdblist-rc-count">' + formatCompact(count) + '</span>' +
-                    '</div>'
-                );
-
-                if (userVote === def.key) {
-                    $pill.addClass('is-active');
-                }
-
-                function handleToggle(ev) {
-                    if (ev && ev.stopPropagation) ev.stopPropagation();
-                    var now = Date.now();
-                    if (now - lastTrigger < 280) return;
-                    lastTrigger = now;
-
-                    var currentVote = getUserVote(movieId);
-                    var nextVote = (currentVote === def.key) ? '' : def.key;
-                    setUserVote(movieId, nextVote);
-
-                    var currentCounts = $pills.data('baseCounts') || baseCounts;
-                    $pills.find('.mdblist-rc-pill').each(function() {
-                        var $el = $(this);
-                        var k = $el.attr('data-reaction');
-                        var isSelected = (nextVote === k);
-                        var updatedVal = (currentCounts[k] || 0) + (isSelected ? 1 : 0);
-                        $el.toggleClass('is-active', isSelected);
-                        $el.find('.mdblist-rc-count').text(formatCompact(updatedVal));
-                    });
-                }
-
-                $pill.on('hover:enter click', handleToggle);
-                $pills.append($pill);
-            })(REACTION_DEFS[i]);
+            wrapper.appendChild(pillsRow);
         }
 
-        $pills.data('baseCounts', baseCounts);
-        return $pills;
-    }
-
-    function updateReactionsDOM($pills, movieId, baseCounts) {
-        var userVote = getUserVote(movieId);
-        $pills.data('baseCounts', baseCounts);
-        $pills.find('.mdblist-rc-pill').each(function() {
-            var $el = $(this);
-            var k = $el.attr('data-reaction');
-            var isSelected = (userVote === k);
-            var val = (baseCounts[k] || 0) + (isSelected ? 1 : 0);
-            $el.toggleClass('is-active', isSelected);
-            $el.find('.mdblist-rc-count').text(formatCompact(val));
-        });
-    }
-
-    function renderRatingsDOM($ratings, ratingsMap) {
-        $ratings.empty();
-        for (var i = 0; i < PLATFORM_ORDER.length; i++) {
-            var src = PLATFORM_ORDER[i];
-            var item = ratingsMap[src];
-            if (!item) continue;
-
-            var iconHtml = buildPlatformIcon(src, item.numeric100);
-            var $item = $(
-                '<div class="mdblist-rc-rating-item" data-source="' + src + '">' +
-                '    <div class="mdblist-rc-rating-top">' +
-                '        <div class="mdblist-rc-icon">' + iconHtml + '</div>' +
-                '        <div class="mdblist-rc-score-wrap">' +
-                '            <span class="mdblist-rc-score">' + item.displayScore + '</span>' +
-                '            <span class="mdblist-rc-denom">' + item.denom + '</span>' +
-                '        </div>' +
-                '    </div>' +
-                '    <div class="mdblist-rc-votes">' + formatVotesLabel(item.votes) + '</div>' +
-                '</div>'
-            );
-            $ratings.append($item);
-        }
-    }
-
-    function syncSpatialCollection(render, activity) {
-        if (!window.Lampa || !Lampa.Controller || !Lampa.Activity) return;
-        try {
-            var active = Lampa.Activity.active();
-            if (!active || active.activity !== activity) return;
-            var enabled = Lampa.Controller.enabled();
-            if (enabled && enabled.name === 'full_start') {
-                var focused = render.find('.focus').get(0);
-                Lampa.Controller.collectionSet(render);
-                if (focused) {
-                    Lampa.Controller.collectionFocus(focused, render);
+        if (data.ratings && data.ratings.length > 0) {
+            var ratingMap = {};
+            var rIdx;
+            for (rIdx = 0; rIdx < data.ratings.length; rIdx++) {
+                var rItem = data.ratings[rIdx];
+                if (!rItem) continue;
+                var normKey = normalizeSourceKey(rItem.source);
+                if (normKey && !ratingMap[normKey]) {
+                    ratingMap[normKey] = rItem;
                 }
             }
-        } catch (err) {
-            // Safe ignore if controller not active yet
+
+            var ratingsRow = document.createElement('div');
+            ratingsRow.className = 'mdb-ratings-row';
+            var renderedRatings = 0;
+
+            for (rIdx = 0; rIdx < PLATFORM_ORDER.length; rIdx++) {
+                var srcKey = PLATFORM_ORDER[rIdx];
+                if (!isPlatformEnabled(srcKey, settings)) continue;
+
+                var ratingObj = ratingMap[srcKey];
+                if (!ratingObj || ratingObj.value === null || ratingObj.value === undefined) continue;
+                var numVal = Number(ratingObj.value);
+                if (isNaN(numVal) || numVal <= 0) continue;
+
+                var parts = formatRatingParts(srcKey, ratingObj);
+                var badgeHtml = settings.badgeStyle === 'text_badges'
+                    ? createTextBadge(srcKey)
+                    : createSvgLogo(srcKey, numVal);
+
+                var itemEl = document.createElement('div');
+                itemEl.className = 'mdb-rating-item mdb-source-' + srcKey;
+
+                var topEl = document.createElement('div');
+                topEl.className = 'mdb-rating-top';
+
+                var iconWrap = document.createElement('div');
+                iconWrap.className = 'mdb-badge-icon';
+                iconWrap.innerHTML = badgeHtml;
+
+                var scoreGroup = document.createElement('div');
+                scoreGroup.className = 'mdb-score-group';
+
+                var scoreValEl = document.createElement('span');
+                scoreValEl.className = 'mdb-score-val';
+                scoreValEl.textContent = parts.score;
+
+                var scoreDenomEl = document.createElement('span');
+                scoreDenomEl.className = 'mdb-score-denom';
+                scoreDenomEl.textContent = parts.denom;
+
+                scoreGroup.appendChild(scoreValEl);
+                scoreGroup.appendChild(scoreDenomEl);
+                topEl.appendChild(iconWrap);
+                topEl.appendChild(scoreGroup);
+                itemEl.appendChild(topEl);
+
+                var votesNum = Number(ratingObj.votes) || 0;
+                if (votesNum > 0) {
+                    var votesEl = document.createElement('div');
+                    votesEl.className = 'mdb-votes-sub';
+                    votesEl.textContent = formatVotesText(votesNum);
+                    itemEl.appendChild(votesEl);
+                }
+
+                ratingsRow.appendChild(itemEl);
+                renderedRatings++;
+            }
+
+            if (renderedRatings > 0) {
+                wrapper.appendChild(ratingsRow);
+            }
         }
+
+        if (wrapper.children.length === 0) {
+            return null;
+        }
+        return wrapper;
     }
 
-    function onFullEvent(e) {
-        if (!e || e.type !== 'complite') return;
-        if (!e.data || !e.data.movie || !e.object || !e.object.activity) return;
+    function renderIntoCard(renderNode, movie, data) {
+        if (!renderNode) return;
+        var rootEl = renderNode.jquery ? renderNode[0] : renderNode;
+        if (!rootEl || !rootEl.querySelector) return;
 
-        var movie = e.data.movie;
-        var activity = e.object.activity;
-        var render = activity.render();
-        if (!render || !render.length) return;
+        var existingReactions = rootEl.querySelectorAll('.full-start__reactions, .full-start-new__reactions');
+        var i;
+        for (i = 0; i < existingReactions.length; i++) {
+            existingReactions[i].style.display = 'none';
+        }
 
-        render.find('.mdblist-rc-root').remove();
+        var oldWrappers = rootEl.querySelectorAll('.mdb-reactions-wrapper');
+        for (i = 0; i < oldWrappers.length; i++) {
+            if (oldWrappers[i].parentNode) {
+                oldWrappers[i].parentNode.removeChild(oldWrappers[i]);
+            }
+        }
 
-        var $origReactions = render.find('.full-start-new__reactions, .full-start__reactions');
-        var $root = $('<div class="mdblist-rc-root"></div>');
+        var settings = getSettings();
+        var wrapper = buildWrapperElement(data, movie, settings);
+        if (!wrapper) return;
 
-        if ($origReactions.length) {
-            $origReactions.addClass('mdblist-rc-hidden-orig');
-            $origReactions.first().after($root);
+        var buttonsTarget = rootEl.querySelector('.full-start-new__buttons, .full-start__buttons');
+        if (buttonsTarget && buttonsTarget.parentNode) {
+            buttonsTarget.parentNode.insertBefore(wrapper, buttonsTarget);
         } else {
-            var $buttons = render.find('.full-start-new__buttons, .full-start__buttons');
-            if ($buttons.length) {
-                $buttons.first().before($root);
-            } else {
-                var $body = render.find('.full-start-new__body, .full-start__body');
-                if ($body.length) {
-                    $body.first().append($root);
-                } else {
-                    render.append($root);
-                }
+            var bodyTarget = rootEl.querySelector('.full-start-new__body, .full-start__body, .full-start');
+            if (bodyTarget) {
+                bodyTarget.appendChild(wrapper);
             }
         }
+    }
 
-        var initialRatingsMap = normalizeRatings(null, movie);
-        var initialCounts = computeGaussianReactions(initialRatingsMap, movie);
+    function registerSettings() {
+        if (!window.Lampa || !Lampa.SettingsApi) return;
 
-        var $pills = buildReactionsDOM(movie.id, initialCounts);
-        var $ratings = $('<div class="mdblist-rc-ratings"></div>');
-        renderRatingsDOM($ratings, initialRatingsMap);
+        var sidebarIcon = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+            '<path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/>' +
+            '</svg>';
 
-        $root.append($pills);
-        $root.append($ratings);
+        Lampa.SettingsApi.addComponent({
+            component: PLUGIN_COMPONENT,
+            name: 'MDBList Реакції',
+            icon: sidebarIcon
+        });
 
-        syncSpatialCollection(render, activity);
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
+                name: 'mdb_pill_style',
+                type: 'select',
+                values: {
+                    glass: 'Темне скло (стандартний стиль Lampa)',
+                    solid: 'Контрастний темний',
+                    outline: 'Мінімалістичний контур',
+                    compact: 'Компактний'
+                },
+                default: 'glass'
+            },
+            field: {
+                name: 'Стиль капсул реакцій',
+                description: 'Зовнішній вигляд кнопок емодзі-реакцій на сторінці фільму'
+            }
+        });
 
-        fetchMdblistData(movie, function(apiData) {
-            if (!$root.closest('body').length) return;
-            var finalRatingsMap = normalizeRatings(apiData, movie);
-            var finalCounts = computeGaussianReactions(finalRatingsMap, movie);
-            updateReactionsDOM($pills, movie.id, finalCounts);
-            renderRatingsDOM($ratings, finalRatingsMap);
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
+                name: 'mdb_badge_style',
+                type: 'select',
+                values: {
+                    original: 'Оригінальні логотипи',
+                    monochrome: 'Монохромний',
+                    text_badges: 'Текстові плашки'
+                },
+                default: 'original'
+            },
+            field: {
+                name: 'Стиль іконок та бейджів рейтингів',
+                description: 'Формат відображення логотипів рейтингів платформ'
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
+                name: 'mdb_scale',
+                type: 'select',
+                values: {
+                    '0.85': 'Малий',
+                    '1.0': 'Стандартний',
+                    '1.15': 'Великий'
+                },
+                default: '1.0'
+            },
+            field: {
+                name: 'Розмір блоку',
+                description: 'Загальний масштаб блоку реакцій та рейтингів'
+            }
+        });
+
+        var toggles = new Array(
+            { key: 'mdb_show_pills', title: 'Показувати реакції (5 емодзі)' },
+            { key: 'mdb_show_imdb', title: 'Показувати IMDb' },
+            { key: 'mdb_show_trakt', title: 'Показувати Trakt' },
+            { key: 'mdb_show_tmdb', title: 'Показувати TMDB' },
+            { key: 'mdb_show_letterboxd', title: 'Показувати Letterboxd' },
+            { key: 'mdb_show_tomatoes', title: 'Показувати Rotten Tomatoes' },
+            { key: 'mdb_show_popcorn', title: 'Показувати Popcornmeter' },
+            { key: 'mdb_show_metacritic', title: 'Показувати Metacritic' },
+            { key: 'mdb_show_rogerebert', title: 'Показувати Roger Ebert' }
+        );
+
+        var i;
+        for (i = 0; i < toggles.length; i++) {
+            Lampa.SettingsApi.addParam({
+                component: PLUGIN_COMPONENT,
+                param: {
+                    name: toggles[i].key,
+                    type: 'trigger',
+                    default: true
+                },
+                field: {
+                    name: toggles[i].title
+                }
+            });
+        }
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
+                name: 'mdb_clear_cache_btn',
+                type: 'button'
+            },
+            field: {
+                name: 'Очистити кеш MDBList',
+                description: 'Видалити збережені рейтинги та реакції для повторного завантаження'
+            },
+            onChange: function() {
+                clearPluginCache();
+            }
         });
     }
 
-    function startPlugin() {
-        if (window.mdblist_reactions_started) return;
-        window.mdblist_reactions_started = true;
-        registerManifest();
-        injectStyles();
-        if (window.Lampa && Lampa.Listener) {
-            Lampa.Listener.follow('full', onFullEvent);
+    function registerManifest() {
+        if (!window.Lampa || !Lampa.Manifest || !Lampa.Manifest.plugins) return;
+        if (typeof Lampa.Manifest.plugins.push === 'function') {
+            Lampa.Manifest.plugins.push({
+                type: 'other',
+                version: '1.0.0',
+                name: 'MDBList Реакції та Рейтинги',
+                description: 'Інтерактивні реакції за оцінками 1–10 з MDBList та панель рейтингів з 8 платформ',
+                component: PLUGIN_COMPONENT
+            });
         }
+    }
+
+    function attachFullListener() {
+        if (!window.Lampa || !Lampa.Listener) return;
+
+        Lampa.Listener.follow('full', function(e) {
+            if (!e || e.type !== 'complite') return;
+            if (!e.data || !e.data.movie || !e.data.movie.id) return;
+            if (!e.object || !e.object.activity) return;
+
+            var movie = e.data.movie;
+            var activity = e.object.activity;
+            var renderNode = activity.render();
+
+            var staleReactions = (renderNode && renderNode.jquery ? renderNode[0] : renderNode);
+            if (staleReactions && staleReactions.querySelectorAll) {
+                var hiddenNodes = staleReactions.querySelectorAll('.full-start__reactions, .full-start-new__reactions');
+                var h;
+                for (h = 0; h < hiddenNodes.length; h++) {
+                    hiddenNodes[h].style.display = 'none';
+                }
+            }
+
+            fetchMdblistData(movie).then(function(data) {
+                if (!data) return;
+                var currentRender = activity.render();
+                renderIntoCard(currentRender, movie, data);
+            }).catch(function() {
+                /* silent fail on network error */
+            });
+        });
+    }
+
+    function initPlugin() {
+        if (initialized) return;
+        initialized = true;
+
+        injectStyles();
+        registerManifest();
+        registerSettings();
+        attachFullListener();
     }
 
     if (window.appready) {
-        startPlugin();
+        initPlugin();
     } else if (window.Lampa && Lampa.Listener) {
         Lampa.Listener.follow('app', function(e) {
             if (e && e.type === 'ready') {
-                startPlugin();
+                initPlugin();
             }
+        });
+    } else {
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.Lampa) initPlugin();
         });
     }
 })();

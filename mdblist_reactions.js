@@ -137,11 +137,6 @@
         return {
             pillStyle: getStorageStr('mdb_pill_style', 'glass'),
             badgeStyle: getStorageStr('mdb_badge_style', 'original'),
-            scale: getStorageStr('mdb_scale', '1.0'),
-            titleSize: getStorageStr('mdb_title_size', 'default'),
-            taglineSize: getStorageStr('mdb_tagline_size', 'compact'),
-            buttonsSize: getStorageStr('mdb_buttons_size', 'default'),
-            descSize: getStorageStr('mdb_desc_size', 'default'),
             autoScrobble: getStorageBoolTrueDefault('trakt_auto_scrobble'),
             showWatchedBadge: getStorageBoolTrueDefault('trakt_show_watched'),
             syncWatchlist: getStorageBoolTrueDefault('trakt_sync_watchlist'),
@@ -2211,33 +2206,15 @@
             '.full-start__rate-line, .full-start-new__rate-line {' +
             '  display: none !important;' +
             '}' +
-            '.mdb-title-medium { font-size: 2.3em !important; line-height: 1.15 !important; }' +
-            '.mdb-title-compact { font-size: 1.9em !important; line-height: 1.15 !important; }' +
-            '.mdb-title-small { font-size: 1.6em !important; line-height: 1.15 !important; }' +
-
-            '.mdb-tagline-compact { font-size: 1.05em !important; opacity: 0.78 !important; }' +
-            '.mdb-tagline-small { font-size: 0.9em !important; opacity: 0.75 !important; }' +
-            '.mdb-tagline-hidden { display: none !important; }' +
-
-            '.mdb-buttons-compact .full-start__button { font-size: 0.88em !important; }' +
-            '.mdb-buttons-small .full-start__button { font-size: 0.78em !important; }' +
-
-            '.mdb-desc-compact { font-size: 1.05em !important; line-height: 1.38 !important; }' +
-            '.mdb-desc-small { font-size: 0.92em !important; line-height: 1.32 !important; }' +
-            '.mdb-desc-hidden { display: none !important; }' +
 
             '.mdb-reactions-wrapper {' +
             '  position: relative;' +
             '  z-index: 2;' +
             '  display: block !important;' +
             '  width: 100%;' +
-            '  margin: 0.75em 0 1.15em 0;' +
-            '  transform-origin: left top;' +
+            '  margin: 0.55em 0 1.05em 0;' +
             '  box-sizing: border-box;' +
             '}' +
-            '.mdb-reactions-wrapper.mdb-scale-085 { zoom: 0.85; }' +
-            '.mdb-reactions-wrapper.mdb-scale-10 { zoom: 1; }' +
-            '.mdb-reactions-wrapper.mdb-scale-115 { zoom: 1.15; }' +
 
             'body.cardify .mdb-reactions-wrapper, .cardify .mdb-reactions-wrapper, body.cardify .mdb-pills-row, .cardify .mdb-pills-row {' +
             '  overflow: visible !important;' +
@@ -2249,9 +2226,10 @@
             '}' +
 
             '.mdb-watched-row {' +
+            '  min-height: 2.1em;' +
             '  display: flex !important;' +
             '  align-items: center;' +
-            '  margin-bottom: 0.65em;' +
+            '  margin-bottom: 0.45em;' +
             '}' +
             '.mdb-watched-badge {' +
             '  display: inline-flex;' +
@@ -2280,6 +2258,9 @@
             '  display: inline-flex;' +
             '  align-items: center;' +
             '  justify-content: center;' +
+            '  background: rgba(255, 255, 255, 0.08) !important;' +
+            '  border: none !important;' +
+            '  color: #ffffff;' +
             '}' +
             '.mdb-trakt-watched-btn svg {' +
             '  width: 1.35em;' +
@@ -2291,14 +2272,9 @@
             '  display: none;' +
             '  white-space: nowrap;' +
             '}' +
-            '.mdb-trakt-watched-btn.is-watched {' +
-            '  background: rgba(255, 255, 255, 0.22);' +
-            '  border: 1.5px solid rgba(255, 255, 255, 0.85);' +
-            '  color: #ffffff;' +
-            '}' +
             '.mdb-trakt-watched-btn.focus, .mdb-trakt-watched-btn:hover {' +
             '  background: #ffffff !important;' +
-            '  border-color: #ffffff !important;' +
+            '  border: none !important;' +
             '  color: #000000 !important;' +
             '}' +
             '.mdb-trakt-watched-btn.focus > span, .mdb-trakt-watched-btn:hover > span {' +
@@ -2615,63 +2591,18 @@
         document.head.appendChild(styleEl);
     }
 
-    function applyCardTypographyAndButtonStyles(rootEl, settings) {
-        if (!rootEl || !rootEl.querySelectorAll) return;
-
-        var titleNodes = rootEl.querySelectorAll('.full-start__title, .full-start-new__title');
-        var i;
-        for (i = 0; i < titleNodes.length; i++) {
-            var tNode = titleNodes[i];
-            tNode.classList.remove('mdb-title-medium');
-            tNode.classList.remove('mdb-title-compact');
-            tNode.classList.remove('mdb-title-small');
-            if (settings.titleSize && settings.titleSize !== 'default') {
-                tNode.classList.add('mdb-title-' + settings.titleSize);
-            }
-        }
-
-        var tagNodes = rootEl.querySelectorAll('.full-start__tagline, .full-start-new__tagline');
-        for (i = 0; i < tagNodes.length; i++) {
-            var gNode = tagNodes[i];
-            gNode.classList.remove('mdb-tagline-compact');
-            gNode.classList.remove('mdb-tagline-small');
-            gNode.classList.remove('mdb-tagline-hidden');
-            if (settings.taglineSize && settings.taglineSize !== 'default') {
-                gNode.classList.add('mdb-tagline-' + settings.taglineSize);
-            }
-        }
-
-        var btnRows = rootEl.querySelectorAll('.full-start__buttons, .full-start-new__buttons');
-        for (i = 0; i < btnRows.length; i++) {
-            var bRow = btnRows[i];
-            bRow.classList.remove('mdb-buttons-compact');
-            bRow.classList.remove('mdb-buttons-small');
-            if (settings.buttonsSize && settings.buttonsSize !== 'default') {
-                bRow.classList.add('mdb-buttons-' + settings.buttonsSize);
-            }
-        }
-
-        var descNodes = rootEl.querySelectorAll('.full-start__description, .full-start-new__description');
-        for (i = 0; i < descNodes.length; i++) {
-            var dNode = descNodes[i];
-            dNode.classList.remove('mdb-desc-compact');
-            dNode.classList.remove('mdb-desc-small');
-            dNode.classList.remove('mdb-desc-hidden');
-            if (settings.descSize && settings.descSize !== 'default') {
-                dNode.classList.add('mdb-desc-' + settings.descSize);
-            }
-        }
-    }
-
     function createWatchedStatusRow(data) {
+        var row = document.createElement('div');
+        row.className = 'mdb-watched-row';
+
         var ws = data.watchedStatus;
-        if (!ws) return null;
+        if (!ws) return row;
 
         var badgeText = '';
         var badgeClass = '';
 
         if (ws.isShow) {
-            if (ws.watchedEpisodes <= 0) return null;
+            if (ws.watchedEpisodes <= 0) return row;
             if (ws.totalEpisodes > 0) {
                 badgeText = '✓ Переглянуто ' + ws.watchedEpisodes + ' з ' + ws.totalEpisodes + ' серій';
                 badgeClass = (ws.watchedEpisodes >= ws.totalEpisodes) ? 'is-watched-full' : 'is-watched';
@@ -2680,13 +2611,10 @@
                 badgeClass = 'is-watched';
             }
         } else {
-            if (!ws.watched) return null;
+            if (!ws.watched) return row;
             badgeText = '✓ Переглянуто';
             badgeClass = 'is-watched';
         }
-
-        var row = document.createElement('div');
-        row.className = 'mdb-watched-row';
 
         var badge = document.createElement('div');
         badge.className = 'mdb-watched-badge ' + badgeClass;
@@ -2698,9 +2626,8 @@
 
     function getWatchedActionSvg(isWatched) {
         if (isWatched) {
-            return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
-                '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>' +
-                '<path d="M9.5 12l2 2 4-4"/>' +
+            return '<svg viewBox="0 0 24 24" fill="currentColor">' +
+                '<path fill-rule="evenodd" d="M12 5C6.5 5 2.1 8.4 1 12c1.1 3.6 5.5 7 11 7s9.9-3.4 11-7c-1.1-3.6-5.5-7-11-7zM8.3 11.7L11.0 14.3L15.7 9.3L17.0 10.5L11.0 16.8L7.0 12.9Z"/>' +
                 '</svg>';
         }
         return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
@@ -2729,18 +2656,8 @@
         var isCurrentlyWatched = Boolean(ws && (ws.isShow ? (ws.watchedEpisodes > 0) : ws.watched));
 
         var btn = document.createElement('div');
-        btn.className = 'full-start__button selector mdb-trakt-watched-btn' + (isCurrentlyWatched ? ' is-watched' : '');
-
-        var updateBtnVisual = function(watchedState) {
-            if (watchedState) {
-                btn.classList.add('is-watched');
-            } else {
-                btn.classList.remove('is-watched');
-            }
-            btn.innerHTML = getWatchedActionSvg(watchedState) + '<span>Переглянуто</span>';
-        };
-
-        updateBtnVisual(isCurrentlyWatched);
+        btn.className = 'full-start__button selector mdb-trakt-watched-btn';
+        btn.innerHTML = getWatchedActionSvg(isCurrentlyWatched) + '<span>Переглянуто</span>';
 
         var lastBtnTapTs = 0;
         var handleBtnClick = function(ev) {
@@ -2799,20 +2716,13 @@
         var mediaVoteKey = type + '_' + movie.id;
 
         var wrapper = document.createElement('div');
-        var scaleClass = 'mdb-scale-10';
-        if (settings.scale === '0.85') scaleClass = 'mdb-scale-085';
-        if (settings.scale === '1.15') scaleClass = 'mdb-scale-115';
-
         wrapper.className = 'mdb-reactions-wrapper mdb-style-' + settings.pillStyle +
-            ' mdb-badges-' + settings.badgeStyle + ' ' + scaleClass +
+            ' mdb-badges-' + settings.badgeStyle +
             (settings.emojiGlow ? ' mdb-emoji-glow' : '') +
             (settings.emojiAnim ? ' mdb-emoji-anim' : '');
 
-        if (settings.showWatchedBadge && isTraktLoggedIn() && data.watchedStatus) {
-            var watchedRow = createWatchedStatusRow(data);
-            if (watchedRow) {
-                wrapper.appendChild(watchedRow);
-            }
+        if (settings.showWatchedBadge && isTraktLoggedIn()) {
+            wrapper.appendChild(createWatchedStatusRow(data));
         }
 
         if (settings.showPills && data.reactions) {
@@ -3089,7 +2999,6 @@
 
         var settings = getSettings();
         hideDefaultCardRates(rootEl);
-        applyCardTypographyAndButtonStyles(rootEl, settings);
 
         var oldWrappers = rootEl.querySelectorAll('.mdb-reactions-wrapper');
         var i;
@@ -3208,81 +3117,6 @@
         Lampa.SettingsApi.addParam({
             component: PLUGIN_COMPONENT,
             param: {
-                name: 'mdb_title_size',
-                type: 'select',
-                values: {
-                    'default': 'Стандартний (Lampa)',
-                    medium: 'Середній',
-                    compact: 'Компактний',
-                    small: 'Малий'
-                },
-                default: 'default'
-            },
-            field: {
-                name: 'Розмір назви фільму',
-                description: 'Масштаб заголовка фільму або серіалу на картці'
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: PLUGIN_COMPONENT,
-            param: {
-                name: 'mdb_tagline_size',
-                type: 'select',
-                values: {
-                    'default': 'Стандартний (Lampa)',
-                    compact: 'Компактний',
-                    small: 'Малий',
-                    hidden: 'Приховати слоган'
-                },
-                default: 'compact'
-            },
-            field: {
-                name: 'Розмір слогану (підзаголовка)',
-                description: 'Розмір або приховування слогану під назвою фільму'
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: PLUGIN_COMPONENT,
-            param: {
-                name: 'mdb_buttons_size',
-                type: 'select',
-                values: {
-                    'default': 'Стандартний (Lampa)',
-                    compact: 'Компактний',
-                    small: 'Малий'
-                },
-                default: 'default'
-            },
-            field: {
-                name: 'Розмір нижніх кнопок дій',
-                description: 'Пропорційний масштаб кнопок дій під блоком рейтингів'
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: PLUGIN_COMPONENT,
-            param: {
-                name: 'mdb_desc_size',
-                type: 'select',
-                values: {
-                    'default': 'Стандартний (Lampa)',
-                    compact: 'Компактний',
-                    small: 'Малий',
-                    hidden: 'Приховати опис'
-                },
-                default: 'default'
-            },
-            field: {
-                name: 'Розмір опису (сюжету) фільму',
-                description: 'Розмір або приховування тексту опису на сторінці фільму'
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: PLUGIN_COMPONENT,
-            param: {
                 name: 'mdb_pill_style',
                 type: 'select',
                 values: {
@@ -3314,24 +3148,6 @@
             field: {
                 name: 'Стиль іконок та бейджів рейтингів',
                 description: 'Формат відображення логотипів рейтингів платформ'
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: PLUGIN_COMPONENT,
-            param: {
-                name: 'mdb_scale',
-                type: 'select',
-                values: {
-                    '0.85': 'Малий',
-                    '1.0': 'Стандартний',
-                    '1.15': 'Великий'
-                },
-                default: '1.0'
-            },
-            field: {
-                name: 'Розмір блоку',
-                description: 'Загальний масштаб блоку реакцій та рейтингів'
             }
         });
 
@@ -3411,7 +3227,7 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.4.1',
+                version: '1.4.2',
                 name: 'Trakt & Рейтинги',
                 description: 'Синхронізація Trakt, скробблінг 80%, Watchlist, рекомендації, живі реакції та рейтинги з 7 платформ',
                 component: PLUGIN_COMPONENT
@@ -3434,7 +3250,6 @@
 
             var cachedData = readCache(cacheKey);
             var keys = getApiKeys();
-            var settings = getSettings();
 
             window.setTimeout(function() {
                 var rootEl = resolveRenderRoot(e);
@@ -3442,7 +3257,6 @@
 
                 if (rootEl) {
                     hideDefaultCardRates(rootEl);
-                    applyCardTypographyAndButtonStyles(rootEl, settings);
                 }
 
                 if (cachedData) {

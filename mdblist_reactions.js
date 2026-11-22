@@ -2206,13 +2206,17 @@
             '.full-start__rate-line, .full-start-new__rate-line {' +
             '  display: none !important;' +
             '}' +
+            '.full-start__tagline:empty, .full-start-new__tagline:empty, .full-start__description:empty, .full-start-new__description:empty {' +
+            '  display: none !important;' +
+            '  margin: 0 !important;' +
+            '}' +
 
             '.mdb-reactions-wrapper {' +
             '  position: relative;' +
             '  z-index: 2;' +
             '  display: block !important;' +
             '  width: 100%;' +
-            '  margin: 0.55em 0 1.05em 0;' +
+            '  margin: 0.25em 0 1.05em 0;' +
             '  box-sizing: border-box;' +
             '}' +
 
@@ -2226,20 +2230,21 @@
             '}' +
 
             '.mdb-watched-row {' +
-            '  min-height: 2.1em;' +
+            '  min-height: 1.7em;' +
             '  display: flex !important;' +
             '  align-items: center;' +
+            '  margin-top: 0.35em;' +
             '  margin-bottom: 0.45em;' +
             '}' +
             '.mdb-watched-badge {' +
             '  display: inline-flex;' +
             '  align-items: center;' +
             '  gap: 0.35em;' +
-            '  padding: 0.28em 0.78em;' +
+            '  padding: 0.2em 0.72em;' +
             '  border-radius: 999px;' +
-            '  font-size: 0.88em;' +
+            '  font-size: 0.86em;' +
             '  font-weight: 600;' +
-            '  line-height: 1.2;' +
+            '  line-height: 1.15;' +
             '  user-select: none;' +
             '}' +
             '.mdb-watched-badge.is-watched {' +
@@ -2258,9 +2263,6 @@
             '  display: inline-flex;' +
             '  align-items: center;' +
             '  justify-content: center;' +
-            '  background: rgba(255, 255, 255, 0.08) !important;' +
-            '  border: none !important;' +
-            '  color: #ffffff;' +
             '}' +
             '.mdb-trakt-watched-btn svg {' +
             '  width: 1.35em;' +
@@ -2274,7 +2276,6 @@
             '}' +
             '.mdb-trakt-watched-btn.focus, .mdb-trakt-watched-btn:hover {' +
             '  background: #ffffff !important;' +
-            '  border: none !important;' +
             '  color: #000000 !important;' +
             '}' +
             '.mdb-trakt-watched-btn.focus > span, .mdb-trakt-watched-btn:hover > span {' +
@@ -3227,7 +3228,7 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.4.2',
+                version: '1.4.3',
                 name: 'Trakt & Рейтинги',
                 description: 'Синхронізація Trakt, скробблінг 80%, Watchlist, рекомендації, живі реакції та рейтинги з 7 платформ',
                 component: PLUGIN_COMPONENT

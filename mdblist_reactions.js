@@ -12,8 +12,10 @@
     var TRAKT_WATCHED_CACHE_MOVIES = 'trakt_watched_movies_v1';
     var TRAKT_WATCHED_CACHE_SHOWS = 'trakt_watched_shows_v1';
     var TRAKT_RECS_CACHE_KEY = 'trakt_recs_cache_v1';
+    var TRAKT_PROFILE_STATS_CACHE_KEY = 'trakt_profile_stats_v1';
     var TRAKT_SYNC_TTL_MS = 15 * 60 * 1000;
     var TRAKT_RECS_TTL_MS = 30 * 60 * 1000;
+    var TRAKT_PROFILE_STATS_TTL_MS = 30 * 60 * 1000;
     var CACHE_TTL_MINUTES = 1440;
     var STYLE_ID = 'mdblist-reactions-plugin-styles';
     var PLUGIN_COMPONENT = 'mdblist_reactions';
@@ -109,6 +111,23 @@
     function trimStr(str) {
         if (str === undefined || str === null) return '';
         return String(str).replace(/^\s+|\s+$/g, '');
+    }
+
+    function cleanupLegacyStorageKeys() {
+        var legacyKeys = new Array('mdb_title_size', 'mdb_tagline_size', 'mdb_buttons_size', 'mdb_desc_size');
+        var i;
+        for (i = 0; i < legacyKeys.length; i++) {
+            try {
+                if (window.Lampa && Lampa.Storage && typeof Lampa.Storage.remove === 'function') {
+                    Lampa.Storage.remove(legacyKeys[i]);
+                }
+                if (window.localStorage && typeof window.localStorage.removeItem === 'function') {
+                    window.localStorage.removeItem(legacyKeys[i]);
+                }
+            } catch (err) {
+                /* ignore cleanup errors */
+            }
+        }
     }
 
     function getStorageBoolTrueDefault(key) {
@@ -250,6 +269,15 @@
         }
     }
 
+    function clearTraktProfileStatsCache() {
+        if (!window.Lampa || !Lampa.Storage) return;
+        try {
+            Lampa.Storage.remove(TRAKT_PROFILE_STATS_CACHE_KEY);
+        } catch (err) {
+            /* ignore */
+        }
+    }
+
     function clearPluginCache(silent) {
         var removed = 0;
         try {
@@ -276,6 +304,7 @@
         clearTraktSyncCache();
         clearTraktWatchedCache();
         clearTraktRecsCache();
+        clearTraktProfileStatsCache();
         logDebug('Кеш очищено, видалено записів:', removed);
         if (!silent && window.Lampa && Lampa.Noty) {
             Lampa.Noty.show('Кеш рейтингів очищено');
@@ -295,6 +324,7 @@
         clearTraktSyncCache();
         clearTraktWatchedCache();
         clearTraktRecsCache();
+        clearTraktProfileStatsCache();
     }
 
     function saveTraktTokens(tokenData) {
@@ -319,6 +349,138 @@
             }
         } catch (err) {
             /* ignore */
+        }
+    }
+
+    function fetchTraktProfileStats(callback) {
+        var keys = getApiKeys();
+        if (!isTraktLoggedIn() || !keys.traktClientId) {
+            callback(null);
+            return;
+        }
+
+        try {
+            if (window.Lampa && Lampa.Storage) {
+                var cached = Lampa.Storage.get(TRAKT_PROFILE_STATS_CACHE_KEY, null);
+                if (cached && cached._ts && cached.stats) {
+                    if ((new Date().getTime() - Number(cached._ts)) < TRAKT_PROFILE_STATS_TTL_MS) {
+                        callback(cached.stats);
+                        return;
+                    }
+                }
+            }
+        } catch (eCache) {
+            /* ignore */
+        }
+
+        ensureValidTraktToken(function(token) {
+            if (!token) {
+                callback(null);
+                return;
+            }
+
+            xhrTraktRequest('GET', 'https://api.trakt.tv/users/me', null, token, keys.traktClientId, function(meStatus, meData) {
+                if (meStatus !== 200 || !meData) {
+                    callback(null);
+                    return;
+                }
+
+                var username = meData.username || (meData.ids && meData.ids.slug) || '';
+
+                xhrTraktRequest('GET', 'https://api.trakt.tv/users/me/stats', null, token, keys.traktClientId, function(stStatus, statsData) {
+                    if (stStatus !== 200 || !statsData) {
+                        callback(null);
+                        return;
+                    }
+
+                    var moviesCount = (statsData.movies && Number(statsData.movies.watched)) ? Number(statsData.movies.watched) : 0;
+                    var episodesCount = (statsData.episodes && Number(statsData.episodes.watched)) ? Number(statsData.episodes.watched) : 0;
+                    var ratingsCount = 0;
+
+                    if (statsData.ratings && statsData.ratings.total !== undefined && statsData.ratings.total !== null) {
+                        ratingsCount = Number(statsData.ratings.total) || 0;
+                    } else {
+                        ratingsCount = ((statsData.movies && Number(statsData.movies.ratings)) || 0) +
+                            ((statsData.shows && Number(statsData.shows.ratings)) || 0) +
+                            ((statsData.seasons && Number(statsData.seasons.ratings)) || 0) +
+                            ((statsData.episodes && Number(statsData.episodes.ratings)) || 0);
+                    }
+
+                    var summary = {
+                        username: String(username || ''),
+                        movies: moviesCount,
+                        episodes: episodesCount,
+                        ratings: ratingsCount
+                    };
+
+                    try {
+                        if (window.Lampa && Lampa.Storage) {
+                            Lampa.Storage.set(TRAKT_PROFILE_STATS_CACHE_KEY, {
+                                _ts: new Date().getTime(),
+                                stats: summary
+                            });
+                        }
+                    } catch (eSave) {
+                        /* ignore */
+                    }
+
+                    callback(summary);
+                });
+            });
+        });
+    }
+
+    function renderSettingsProfileStats() {
+        try {
+            var authBtnEl = document.querySelector('[data-name="trakt_auth_btn"]');
+            if (!authBtnEl) return;
+
+            var existingStatsEl = authBtnEl.querySelector('.mdb-trakt-profile-stats');
+
+            if (!isTraktLoggedIn()) {
+                if (existingStatsEl && existingStatsEl.parentNode) {
+                    existingStatsEl.parentNode.removeChild(existingStatsEl);
+                }
+                return;
+            }
+
+            if (!existingStatsEl) {
+                existingStatsEl = document.createElement('div');
+                existingStatsEl.className = 'mdb-trakt-profile-stats';
+                existingStatsEl.textContent = 'Завантаження статистики профілю Trakt...';
+                authBtnEl.appendChild(existingStatsEl);
+            }
+
+            fetchTraktProfileStats(function(stats) {
+                var targetBtn = document.querySelector('[data-name="trakt_auth_btn"]');
+                if (!targetBtn) return;
+                var targetNode = targetBtn.querySelector('.mdb-trakt-profile-stats');
+
+                if (!isTraktLoggedIn()) {
+                    if (targetNode && targetNode.parentNode) {
+                        targetNode.parentNode.removeChild(targetNode);
+                    }
+                    return;
+                }
+
+                if (!targetNode) {
+                    targetNode = document.createElement('div');
+                    targetNode.className = 'mdb-trakt-profile-stats';
+                    targetBtn.appendChild(targetNode);
+                }
+
+                if (stats) {
+                    var profileTitle = stats.username ? ('@' + stats.username) : 'Trakt';
+                    targetNode.textContent = 'Профіль: ' + profileTitle +
+                        ' • Фільмів: ' + stats.movies +
+                        ' • Серій: ' + stats.episodes +
+                        ' • Оцінок: ' + stats.ratings;
+                } else {
+                    targetNode.textContent = 'Статистика профілю Trakt тимчасово недоступна';
+                }
+            });
+        } catch (err) {
+            /* ignore DOM errors */
         }
     }
 
@@ -547,6 +709,7 @@
                 logDebug('Токен оновлення Trakt недійсний, вихід з акаунта');
                 clearTraktTokens();
                 updateAuthButtonText();
+                renderSettingsProfileStats();
                 callback('');
             } else {
                 callback(accessToken);
@@ -650,8 +813,10 @@
                         clearTraktSyncCache();
                         clearTraktWatchedCache();
                         clearTraktRecsCache();
+                        clearTraktProfileStatsCache();
                         updateAuthButtonText();
                         closeAuthModal();
+                        window.setTimeout(renderSettingsProfileStats, 120);
                         if (window.Lampa && Lampa.Noty) {
                             Lampa.Noty.show('Успішно підключено до Trakt!');
                         }
@@ -1013,6 +1178,220 @@
                 }
                 if (typeof onDone === 'function') onDone(false, null);
             });
+        });
+    }
+
+    function sendShowSeasonHistoryOnTrakt(movie, mdbJson, mode, seasonNum, onDone) {
+        var clientId = trimStr(getStorageStr('trakt_client_id', ''));
+        if (!clientId) {
+            if (window.Lampa && Lampa.Noty) {
+                Lampa.Noty.show('Помилка Trakt: відсутній Client ID');
+            }
+            return;
+        }
+
+        ensureValidTraktToken(function(token) {
+            if (!token) {
+                if (window.Lampa && Lampa.Noty) {
+                    Lampa.Noty.show('Помилка Trakt: відсутній токен авторизації');
+                }
+                return;
+            }
+
+            var imdbId = (mdbJson && mdbJson.ids && mdbJson.ids.imdb) || movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id) || '';
+            var tmdbNum = parseInt(movie.id, 10);
+
+            var itemObj = {
+                ids: {
+                    tmdb: tmdbNum
+                }
+            };
+            if (imdbId) {
+                itemObj.ids.imdb = String(imdbId);
+            }
+            if (mode === 'season' && seasonNum > 0) {
+                itemObj.seasons = new Array({ number: parseInt(seasonNum, 10) });
+            }
+
+            var payload = {
+                shows: new Array(itemObj)
+            };
+
+            var endpoint = (mode === 'remove')
+                ? 'https://api.trakt.tv/sync/history/remove'
+                : 'https://api.trakt.tv/sync/history';
+
+            logDebug('POST ' + endpoint + ' show/season payload:', JSON.stringify(payload));
+            xhrTraktRequest('POST', endpoint, payload, token, clientId, function(status, res, rawText) {
+                logDebug('POST ' + endpoint + ' відповідь:', status, rawText);
+                var ok = isTraktSuccessStatus(status) && !hasNotFoundItems(res);
+
+                if (ok) {
+                    clearTraktWatchedCache();
+                    if (typeof onDone === 'function') onDone(true);
+                    return;
+                }
+
+                var errReason = (res && (res.error_description || res.error || res.message))
+                    ? (' - ' + (res.error_description || res.error || res.message))
+                    : (hasNotFoundItems(res) ? ' (не знайдено)' : '');
+                if (window.Lampa && Lampa.Noty) {
+                    Lampa.Noty.show('Помилка Trakt: HTTP ' + status + errReason);
+                }
+                if (typeof onDone === 'function') onDone(false);
+            });
+        });
+    }
+
+    function getAvailableShowSeasons(movie) {
+        var seasonsList = new Array();
+        var i;
+        if (movie && movie.seasons && movie.seasons.length > 0) {
+            for (i = 0; i < movie.seasons.length; i++) {
+                var s = movie.seasons[i];
+                if (s && Number(s.season_number) > 0) {
+                    seasonsList.push({
+                        number: Number(s.season_number),
+                        episodeCount: Number(s.episode_count) || 0
+                    });
+                }
+            }
+            seasonsList.sort(function(a, b) {
+                return a.number - b.number;
+            });
+        } else if (movie && Number(movie.number_of_seasons) > 0) {
+            var totalSeasons = Number(movie.number_of_seasons);
+            for (i = 1; i <= totalSeasons; i++) {
+                seasonsList.push({
+                    number: i,
+                    episodeCount: 0
+                });
+            }
+        }
+        return seasonsList;
+    }
+
+    function openShowWatchedMenu(rootEl, movie, data) {
+        if (!window.Lampa || !Lampa.Select || typeof Lampa.Select.show !== 'function') {
+            var fallbackCur = Boolean(data.watchedStatus && data.watchedStatus.watchedEpisodes > 0);
+            toggleWatchedOnTrakt(movie, data.mdbJson || null, !fallbackCur, function(ok, newVal) {
+                if (!ok) return;
+                data.watchedStatus = buildWatchedStatusObj(newVal, movie, data.mdbJson || null);
+                renderIntoCard(rootEl, movie, data);
+            });
+            return;
+        }
+
+        var watchedCount = (data.watchedStatus && data.watchedStatus.watchedEpisodes) ? Number(data.watchedStatus.watchedEpisodes) : 0;
+        var selectItems = new Array();
+        var seasonsList = getAvailableShowSeasons(movie);
+        var i;
+
+        selectItems.push({
+            title: 'Позначити весь серіал переглянутим',
+            action: 'all',
+            seasonNumber: 0,
+            episodeCount: countTotalShowEpisodes(movie, data.mdbJson || null)
+        });
+
+        for (i = 0; i < seasonsList.length; i++) {
+            selectItems.push({
+                title: 'Позначити Сезон ' + seasonsList[i].number + ' переглянутим',
+                action: 'season',
+                seasonNumber: seasonsList[i].number,
+                episodeCount: seasonsList[i].episodeCount
+            });
+        }
+
+        if (watchedCount > 0) {
+            selectItems.push({
+                title: 'Очистити історію перегляду серіалу',
+                action: 'remove',
+                seasonNumber: 0,
+                episodeCount: 0
+            });
+        }
+
+        var prevController = 'content';
+        try {
+            if (Lampa.Controller && typeof Lampa.Controller.enabled === 'function') {
+                var activeCtrl = Lampa.Controller.enabled();
+                if (activeCtrl && activeCtrl.name) {
+                    prevController = activeCtrl.name;
+                }
+            }
+        } catch (ePrev) {
+            /* ignore */
+        }
+
+        var restoreControllerAndFocus = function() {
+            if (window.Lampa && Lampa.Controller && typeof Lampa.Controller.toggle === 'function') {
+                try {
+                    Lampa.Controller.toggle(prevController);
+                } catch (eTog) {
+                    /* ignore */
+                }
+            }
+            var btnEl = rootEl.querySelector('.mdb-trakt-watched-btn');
+            if (btnEl && window.Lampa && Lampa.Controller && typeof Lampa.Controller.collectionFocus === 'function') {
+                try {
+                    Lampa.Controller.collectionFocus(btnEl);
+                } catch (eFoc) {
+                    /* ignore */
+                }
+            }
+        };
+
+        Lampa.Select.show({
+            title: 'Історія перегляду серіалу',
+            items: selectItems,
+            onSelect: function(selected) {
+                restoreControllerAndFocus();
+                if (!selected || !selected.action) return;
+
+                sendShowSeasonHistoryOnTrakt(movie, data.mdbJson || null, selected.action, selected.seasonNumber, function(ok) {
+                    if (!ok) return;
+
+                    if (selected.action === 'all') {
+                        var totalEps = countTotalShowEpisodes(movie, data.mdbJson || null);
+                        var allVal = Math.max(1, totalEps);
+                        updateLocalWatchedMap(true, movie, data.mdbJson || null, allVal);
+                        syncNativeLampaWatched(movie, true);
+                        data.watchedStatus = buildWatchedStatusObj(allVal, movie, data.mdbJson || null);
+                        renderIntoCard(rootEl, movie, data);
+                        restoreControllerAndFocus();
+                        if (Lampa.Noty) Lampa.Noty.show('Позначено весь серіал переглянутим');
+                    } else if (selected.action === 'remove') {
+                        updateLocalWatchedMap(true, movie, data.mdbJson || null, 0);
+                        syncNativeLampaWatched(movie, false);
+                        data.watchedStatus = buildWatchedStatusObj(0, movie, data.mdbJson || null);
+                        renderIntoCard(rootEl, movie, data);
+                        restoreControllerAndFocus();
+                        if (Lampa.Noty) Lampa.Noty.show('Історію перегляду серіалу очищено');
+                    } else if (selected.action === 'season') {
+                        var prevWatched = (data.watchedStatus && data.watchedStatus.watchedEpisodes) ? Number(data.watchedStatus.watchedEpisodes) : 0;
+                        var estAdded = selected.episodeCount > 0 ? selected.episodeCount : 1;
+                        var totalKnown = countTotalShowEpisodes(movie, data.mdbJson || null);
+                        var optimisticVal = totalKnown > 0 ? Math.min(totalKnown, prevWatched + estAdded) : (prevWatched + estAdded);
+
+                        data.watchedStatus = buildWatchedStatusObj(optimisticVal, movie, data.mdbJson || null);
+                        renderIntoCard(rootEl, movie, data);
+                        restoreControllerAndFocus();
+                        if (Lampa.Noty) Lampa.Noty.show('Позначено Сезон ' + selected.seasonNumber + ' переглянутим');
+
+                        fetchUserWatchedStatusForMedia(movie, data.mdbJson || null, function(freshStatus) {
+                            if (freshStatus) {
+                                data.watchedStatus = freshStatus;
+                                renderIntoCard(rootEl, movie, data);
+                                restoreControllerAndFocus();
+                            }
+                        });
+                    }
+                });
+            },
+            onBack: function() {
+                restoreControllerAndFocus();
+            }
         });
     }
 
@@ -2216,7 +2595,7 @@
             '  z-index: 2;' +
             '  display: block !important;' +
             '  width: 100%;' +
-            '  margin: 0.25em 0 1.05em 0;' +
+            '  margin: 0.45em 0 0.85em 0;' +
             '  box-sizing: border-box;' +
             '}' +
 
@@ -2230,11 +2609,14 @@
             '}' +
 
             '.mdb-watched-row {' +
-            '  min-height: 1.7em;' +
-            '  display: flex !important;' +
+            '  display: flex;' +
             '  align-items: center;' +
-            '  margin-top: 0.35em;' +
+            '  margin-top: 0;' +
             '  margin-bottom: 0.45em;' +
+            '}' +
+            '.mdb-watched-row:empty {' +
+            '  display: none !important;' +
+            '  margin: 0 !important;' +
             '}' +
             '.mdb-watched-badge {' +
             '  display: inline-flex;' +
@@ -2289,7 +2671,7 @@
             '  flex-wrap: wrap !important;' +
             '  align-items: center !important;' +
             '  gap: 0.6em;' +
-            '  margin-bottom: 0.95em;' +
+            '  margin-bottom: 0.75em;' +
             '}' +
 
             '.mdb-pill {' +
@@ -2550,6 +2932,18 @@
             '  word-break: break-word;' +
             '}' +
 
+            '.mdb-trakt-profile-stats {' +
+            '  margin-top: 0.45em;' +
+            '  font-size: 0.88em;' +
+            '  font-weight: 600;' +
+            '  color: #69f0ae;' +
+            '  line-height: 1.35;' +
+            '  letter-spacing: 0.01em;' +
+            '}' +
+            '.settings-param.focus .mdb-trakt-profile-stats {' +
+            '  color: #1b5e20;' +
+            '}' +
+
             '.mdb-trakt-auth-modal {' +
             '  text-align: center;' +
             '  padding: 1.2em 1em;' +
@@ -2593,17 +2987,14 @@
     }
 
     function createWatchedStatusRow(data) {
-        var row = document.createElement('div');
-        row.className = 'mdb-watched-row';
-
         var ws = data.watchedStatus;
-        if (!ws) return row;
+        if (!ws) return null;
 
         var badgeText = '';
         var badgeClass = '';
 
         if (ws.isShow) {
-            if (ws.watchedEpisodes <= 0) return row;
+            if (ws.watchedEpisodes <= 0) return null;
             if (ws.totalEpisodes > 0) {
                 badgeText = '✓ Переглянуто ' + ws.watchedEpisodes + ' з ' + ws.totalEpisodes + ' серій';
                 badgeClass = (ws.watchedEpisodes >= ws.totalEpisodes) ? 'is-watched-full' : 'is-watched';
@@ -2612,10 +3003,13 @@
                 badgeClass = 'is-watched';
             }
         } else {
-            if (!ws.watched) return row;
+            if (!ws.watched) return null;
             badgeText = '✓ Переглянуто';
             badgeClass = 'is-watched';
         }
+
+        var row = document.createElement('div');
+        row.className = 'mdb-watched-row';
 
         var badge = document.createElement('div');
         badge.className = 'mdb-watched-badge ' + badgeClass;
@@ -2667,19 +3061,20 @@
             if (now - lastBtnTapTs < 350) return;
             lastBtnTapTs = now;
 
+            var isShow = Boolean(movie.first_air_date);
+            if (isShow) {
+                openShowWatchedMenu(rootEl, movie, data);
+                return;
+            }
+
             var curWs = data.watchedStatus;
-            var currentlyMarked = Boolean(curWs && (curWs.isShow ? (curWs.watchedEpisodes > 0) : curWs.watched));
+            var currentlyMarked = Boolean(curWs && curWs.watched);
             var targetMark = !currentlyMarked;
 
             toggleWatchedOnTrakt(movie, data.mdbJson || null, targetMark, function(ok, newVal) {
                 if (!ok) return;
-                var isShow = Boolean(movie.first_air_date);
                 if (!data.watchedStatus) {
                     data.watchedStatus = buildWatchedStatusObj(newVal, movie, data.mdbJson || null);
-                } else if (isShow) {
-                    data.watchedStatus.watchedEpisodes = Number(newVal) || 0;
-                    data.watchedStatus.watched = data.watchedStatus.watchedEpisodes > 0 &&
-                        (data.watchedStatus.totalEpisodes <= 0 || data.watchedStatus.watchedEpisodes >= data.watchedStatus.totalEpisodes);
                 } else {
                     data.watchedStatus.watched = Boolean(targetMark);
                 }
@@ -2723,7 +3118,10 @@
             (settings.emojiAnim ? ' mdb-emoji-anim' : '');
 
         if (settings.showWatchedBadge && isTraktLoggedIn()) {
-            wrapper.appendChild(createWatchedStatusRow(data));
+            var watchedRow = createWatchedStatusRow(data);
+            if (watchedRow) {
+                wrapper.appendChild(watchedRow);
+            }
         }
 
         if (settings.showPills && data.reactions) {
@@ -3062,6 +3460,7 @@
                 if (isTraktLoggedIn()) {
                     clearTraktTokens();
                     updateAuthButtonText();
+                    renderSettingsProfileStats();
                     if (window.Lampa && Lampa.Noty) {
                         Lampa.Noty.show('Ви вийшли з акаунта Trakt');
                     }
@@ -3110,7 +3509,10 @@
         if (window.Lampa && Lampa.Settings && Lampa.Settings.listener) {
             Lampa.Settings.listener.follow('open', function(ev) {
                 if (ev && ev.name === PLUGIN_COMPONENT) {
-                    window.setTimeout(updateAuthButtonText, 50);
+                    window.setTimeout(function() {
+                        updateAuthButtonText();
+                        renderSettingsProfileStats();
+                    }, 50);
                 }
             });
         }
@@ -3219,6 +3621,7 @@
             },
             onChange: function() {
                 clearPluginCache(false);
+                renderSettingsProfileStats();
             }
         });
     }
@@ -3228,9 +3631,9 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.4.3',
+                version: '1.5.0',
                 name: 'Trakt & Рейтинги',
-                description: 'Синхронізація Trakt, скробблінг 80%, Watchlist, рекомендації, живі реакції та рейтинги з 7 платформ',
+                description: 'Синхронізація Trakt, скробблінг 80%, сезони серіалів, статистика профілю, Watchlist, рекомендації, живі реакції та рейтинги з 7 платформ',
                 component: PLUGIN_COMPONENT
             });
         }
@@ -3374,6 +3777,7 @@
         initialized = true;
 
         logDebug('Ініціалізація плагіна Trakt & Рейтинги');
+        cleanupLegacyStorageKeys();
         injectStyles();
         registerManifest();
         registerSettings();

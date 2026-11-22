@@ -11,12 +11,15 @@
     var TRAKT_SYNC_CACHE_SHOWS = 'trakt_sync_ratings_shows_v1';
     var TRAKT_WATCHED_CACHE_MOVIES = 'trakt_watched_movies_v1';
     var TRAKT_WATCHED_CACHE_SHOWS = 'trakt_watched_shows_v1';
+    var TRAKT_RECS_CACHE_KEY = 'trakt_recs_cache_v1';
     var TRAKT_SYNC_TTL_MS = 15 * 60 * 1000;
+    var TRAKT_RECS_TTL_MS = 30 * 60 * 1000;
     var CACHE_TTL_MINUTES = 1440;
     var STYLE_ID = 'mdblist-reactions-plugin-styles';
     var PLUGIN_COMPONENT = 'mdblist_reactions';
     var initialized = false;
     var activePollTimer = null;
+    var watchlistSyncLock = false;
 
     var scrobbleSession = {
         active: false,
@@ -139,6 +142,8 @@
             taglineSize: getStorageStr('mdb_tagline_size', 'compact'),
             autoScrobble: getStorageBoolTrueDefault('trakt_auto_scrobble'),
             showWatchedBadge: getStorageBoolTrueDefault('trakt_show_watched'),
+            syncWatchlist: getStorageBoolTrueDefault('trakt_sync_watchlist'),
+            showRecs: getStorageBoolTrueDefault('trakt_show_recs'),
             usePngEmojis: getStorageBoolTrueDefault('mdb_use_png_emojis'),
             emojiGlow: getStorageBoolTrueDefault('mdb_emoji_glow'),
             emojiAnim: getStorageBoolTrueDefault('mdb_emoji_anim'),
@@ -239,6 +244,15 @@
         }
     }
 
+    function clearTraktRecsCache() {
+        if (!window.Lampa || !Lampa.Storage) return;
+        try {
+            Lampa.Storage.remove(TRAKT_RECS_CACHE_KEY);
+        } catch (err) {
+            /* ignore */
+        }
+    }
+
     function clearPluginCache(silent) {
         var removed = 0;
         try {
@@ -264,6 +278,7 @@
         }
         clearTraktSyncCache();
         clearTraktWatchedCache();
+        clearTraktRecsCache();
         logDebug('Кеш очищено, видалено записів:', removed);
         if (!silent && window.Lampa && Lampa.Noty) {
             Lampa.Noty.show('Кеш рейтингів очищено');
@@ -282,6 +297,7 @@
         Lampa.Storage.remove(TRAKT_EXPIRES_KEY);
         clearTraktSyncCache();
         clearTraktWatchedCache();
+        clearTraktRecsCache();
     }
 
     function saveTraktTokens(tokenData) {
@@ -636,10 +652,16 @@
                         saveTraktTokens(tokData);
                         clearTraktSyncCache();
                         clearTraktWatchedCache();
+                        clearTraktRecsCache();
                         updateAuthButtonText();
                         closeAuthModal();
                         if (window.Lampa && Lampa.Noty) {
                             Lampa.Noty.show('Успішно підключено до Trakt!');
+                        }
+                        if (getSettings().syncWatchlist) {
+                            window.setTimeout(function() {
+                                runTwoWayWatchlistSync(false);
+                            }, 800);
                         }
                         return;
                     }
@@ -675,12 +697,13 @@
         });
     }
 
-    function readTraktTimedMap(storageKey) {
+    function readTraktTimedMap(storageKey, customTtlMs) {
+        var ttl = customTtlMs || TRAKT_SYNC_TTL_MS;
         try {
             if (!window.Lampa || !Lampa.Storage) return null;
             var raw = Lampa.Storage.get(storageKey, null);
             if (!raw || !raw._ts || !raw.map) return null;
-            if ((new Date().getTime() - Number(raw._ts)) < TRAKT_SYNC_TTL_MS) {
+            if ((new Date().getTime() - Number(raw._ts)) < ttl) {
                 return raw.map;
             }
             return null;
@@ -1073,6 +1096,369 @@
                 });
             }
         });
+    }
+
+    function fetchTmdbCardObject(tmdbId, isShow, callback) {
+        var typePath = isShow ? 'tv' : 'movie';
+
+        try {
+            if (window.Lampa && Lampa.Api && Lampa.Api.sources && Lampa.Api.sources.tmdb && typeof Lampa.Api.sources.tmdb.get === 'function') {
+                Lampa.Api.sources.tmdb.get(typePath + '/' + tmdbId, {}, function(card) {
+                    if (card && card.id) {
+                        if (isShow && !card.first_air_date) {
+                            card.first_air_date = card.first_air_date || '';
+                        }
+                        callback(card);
+                    } else {
+                        callback(null);
+                    }
+                }, function() {
+                    callback(null);
+                });
+                return;
+            }
+        } catch (eApi) {
+            /* fallback to Lampa.TMDB */
+        }
+
+        try {
+            if (window.Lampa && Lampa.TMDB && typeof Lampa.TMDB.api === 'function' && typeof Lampa.TMDB.key === 'function') {
+                var lang = getStorageStr('language', 'uk') === 'uk' ? 'uk-UA' : 'en-US';
+                var tmdbUrl = Lampa.TMDB.api(typePath + '/' + tmdbId + '?api_key=' + Lampa.TMDB.key() + '&language=' + lang);
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', tmdbUrl, true);
+                xhr.timeout = 10000;
+                xhr.onreadystatechange = function() {
+                    if (xhr.readyState !== 4) return;
+                    if (xhr.status === 200) {
+                        try {
+                            var card = JSON.parse(xhr.responseText);
+                            callback(card && card.id ? card : null);
+                            return;
+                        } catch (eParse) {
+                            /* ignore */
+                        }
+                    }
+                    callback(null);
+                };
+                xhr.ontimeout = function() { callback(null); };
+                xhr.onerror = function() { callback(null); };
+                xhr.send();
+                return;
+            }
+        } catch (eTmdb) {
+            /* ignore */
+        }
+
+        callback(null);
+    }
+
+    function resolveTmdbCardsBatch(items, onComplete) {
+        var resolved = new Array();
+        var index = 0;
+
+        function next() {
+            if (index >= items.length) {
+                onComplete(resolved);
+                return;
+            }
+            var current = items[index];
+            index++;
+
+            fetchTmdbCardObject(current.tmdbId, current.isShow, function(card) {
+                if (card && card.id) {
+                    resolved.push(card);
+                }
+                window.setTimeout(next, 60);
+            });
+        }
+
+        next();
+    }
+
+    function isCardInLampaBookmarks(tmdbId) {
+        try {
+            if (!window.Lampa || !Lampa.Favorite) return false;
+            if (typeof Lampa.Favorite.check === 'function') {
+                var chk = Lampa.Favorite.check({ id: Number(tmdbId) });
+                if (chk && chk.book) return true;
+            }
+            if (typeof Lampa.Favorite.get === 'function') {
+                var list = Lampa.Favorite.get({ type: 'book' });
+                if (list && list.length) {
+                    var i;
+                    for (i = 0; i < list.length; i++) {
+                        if (list[i] && Number(list[i].id) === Number(tmdbId)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (err) {
+            /* ignore */
+        }
+        return false;
+    }
+
+    function pushBookmarkToTraktWatchlist(card, isAdd) {
+        if (!card || !card.id || !isTraktLoggedIn()) return;
+        var settings = getSettings();
+        if (!settings.syncWatchlist) return;
+        var clientId = trimStr(getStorageStr('trakt_client_id', ''));
+        if (!clientId) return;
+
+        var isShow = Boolean(card.first_air_date || card.number_of_seasons || card.original_name);
+        var field = isShow ? 'shows' : 'movies';
+        var itemObj = {
+            ids: {
+                tmdb: parseInt(card.id, 10)
+            }
+        };
+        if (card.imdb_id) {
+            itemObj.ids.imdb = String(card.imdb_id);
+        }
+
+        var payload = {};
+        payload[field] = new Array(itemObj);
+
+        var url = isAdd
+            ? 'https://api.trakt.tv/sync/watchlist'
+            : 'https://api.trakt.tv/sync/watchlist/remove';
+
+        ensureValidTraktToken(function(token) {
+            if (!token) return;
+            logDebug('Watchlist sync ' + (isAdd ? 'ADD' : 'REMOVE') + ':', JSON.stringify(payload));
+            xhrTraktRequest('POST', url, payload, token, clientId, function(status, res) {
+                if (isTraktSuccessStatus(status)) {
+                    logDebug('Watchlist sync успішно:', status);
+                } else if (status >= 400 || status === 0) {
+                    var errReason = (res && (res.error_description || res.error || res.message)) ? (' - ' + (res.error_description || res.error || res.message)) : '';
+                    if (window.Lampa && Lampa.Noty) {
+                        Lampa.Noty.show('Помилка Trakt Watchlist: HTTP ' + status + errReason);
+                    }
+                }
+            });
+        });
+    }
+
+    function runTwoWayWatchlistSync(showSuccessToast) {
+        if (!isTraktLoggedIn() || !window.Lampa || !Lampa.Favorite) return;
+        var settings = getSettings();
+        if (!settings.syncWatchlist && !showSuccessToast) return;
+        var clientId = trimStr(getStorageStr('trakt_client_id', ''));
+        if (!clientId) return;
+
+        ensureValidTraktToken(function(token) {
+            if (!token) return;
+
+            var traktTmdbMap = {};
+            var missingInLampa = new Array();
+
+            xhrTraktRequest('GET', 'https://api.trakt.tv/sync/watchlist/movies', null, token, clientId, function(stM, listM) {
+                if (stM === 200 && listM && listM.length) {
+                    var i;
+                    for (i = 0; i < listM.length; i++) {
+                        var mObj = listM[i] && listM[i].movie;
+                        var mTmdb = mObj && mObj.ids ? parseInt(mObj.ids.tmdb, 10) : 0;
+                        if (mTmdb > 0) {
+                            traktTmdbMap['m_' + mTmdb] = true;
+                            if (!isCardInLampaBookmarks(mTmdb)) {
+                                missingInLampa.push({ tmdbId: mTmdb, isShow: false });
+                            }
+                        }
+                    }
+                }
+
+                xhrTraktRequest('GET', 'https://api.trakt.tv/sync/watchlist/shows', null, token, clientId, function(stS, listS) {
+                    if (stS === 200 && listS && listS.length) {
+                        var j;
+                        for (j = 0; j < listS.length; j++) {
+                            var sObj = listS[j] && listS[j].show;
+                            var sTmdb = sObj && sObj.ids ? parseInt(sObj.ids.tmdb, 10) : 0;
+                            if (sTmdb > 0) {
+                                traktTmdbMap['s_' + sTmdb] = true;
+                                if (!isCardInLampaBookmarks(sTmdb)) {
+                                    missingInLampa.push({ tmdbId: sTmdb, isShow: true });
+                                }
+                            }
+                        }
+                    }
+
+                    if (showSuccessToast && typeof Lampa.Favorite.get === 'function') {
+                        var localBooks = Lampa.Favorite.get({ type: 'book' });
+                        if (localBooks && localBooks.length) {
+                            var pushMovies = new Array();
+                            var pushShows = new Array();
+                            var bIdx;
+                            for (bIdx = 0; bIdx < localBooks.length; bIdx++) {
+                                var bCard = localBooks[bIdx];
+                                if (!bCard || !bCard.id) continue;
+                                var bId = parseInt(bCard.id, 10);
+                                if (!bId || isNaN(bId)) continue;
+                                var bIsShow = Boolean(bCard.first_air_date || bCard.number_of_seasons || bCard.original_name);
+                                var mapKey = (bIsShow ? 's_' : 'm_') + bId;
+                                if (!traktTmdbMap[mapKey]) {
+                                    if (bIsShow) {
+                                        pushShows.push({ ids: { tmdb: bId } });
+                                    } else {
+                                        pushMovies.push({ ids: { tmdb: bId } });
+                                    }
+                                }
+                            }
+                            if (pushMovies.length > 0 || pushShows.length > 0) {
+                                var pushPayload = {};
+                                if (pushMovies.length > 0) pushPayload.movies = pushMovies;
+                                if (pushShows.length > 0) pushPayload.shows = pushShows;
+                                xhrTraktRequest('POST', 'https://api.trakt.tv/sync/watchlist', pushPayload, token, clientId, function(pStatus) {
+                                    logDebug('Manual Watchlist push status:', pStatus);
+                                });
+                            }
+                        }
+                    }
+
+                    resolveTmdbCardsBatch(missingInLampa, function(cards) {
+                        var k;
+                        for (k = 0; k < cards.length; k++) {
+                            if (!isCardInLampaBookmarks(cards[k].id)) {
+                                watchlistSyncLock = true;
+                                try {
+                                    Lampa.Favorite.add('book', cards[k]);
+                                } catch (errAdd) {
+                                    /* ignore */
+                                } finally {
+                                    watchlistSyncLock = false;
+                                }
+                            }
+                        }
+                        logDebug('Синхронізовано закладок із Trakt Watchlist:', cards.length);
+                        if (showSuccessToast && window.Lampa && Lampa.Noty) {
+                            Lampa.Noty.show('Watchlist Trakt синхронізовано');
+                        }
+                    });
+                });
+            });
+        });
+    }
+
+    function attachWatchlistListeners() {
+        if (!window.Lampa || !Lampa.Favorite || !Lampa.Favorite.listener) return;
+
+        if (typeof Lampa.Favorite.listener.follow === 'function') {
+            Lampa.Favorite.listener.follow('add', function(e) {
+                if (watchlistSyncLock || !e) return;
+                if (e.where !== 'book' && e.type !== 'book') return;
+                var card = e.card || e.data || null;
+                if (card) pushBookmarkToTraktWatchlist(card, true);
+            });
+
+            Lampa.Favorite.listener.follow('remove', function(e) {
+                if (watchlistSyncLock || !e) return;
+                if (e.where !== 'book' && e.type !== 'book') return;
+                var card = e.card || e.data || null;
+                if (card) pushBookmarkToTraktWatchlist(card, false);
+            });
+        }
+
+        window.setTimeout(function() {
+            if (isTraktLoggedIn() && getSettings().syncWatchlist) {
+                runTwoWayWatchlistSync(false);
+            }
+        }, 3000);
+    }
+
+    function fetchTraktRecommendationsRow(done) {
+        var settings = getSettings();
+        var keys = getApiKeys();
+        if (!settings.showRecs || !isTraktLoggedIn() || !keys.traktClientId) {
+            done(new Array());
+            return;
+        }
+
+        try {
+            if (window.Lampa && Lampa.Storage) {
+                var cachedRecs = Lampa.Storage.get(TRAKT_RECS_CACHE_KEY, null);
+                if (cachedRecs && cachedRecs._ts && cachedRecs.items && cachedRecs.items.length > 0) {
+                    if ((new Date().getTime() - Number(cachedRecs._ts)) < TRAKT_RECS_TTL_MS) {
+                        done(cachedRecs.items);
+                        return;
+                    }
+                }
+            }
+        } catch (errCache) {
+            /* ignore */
+        }
+
+        ensureValidTraktToken(function(token) {
+            if (!token) {
+                done(new Array());
+                return;
+            }
+
+            var recSeeds = new Array();
+
+            xhrTraktRequest('GET', 'https://api.trakt.tv/recommendations/movies?limit=15&ignore_collected=true', null, token, keys.traktClientId, function(stM, listM) {
+                xhrTraktRequest('GET', 'https://api.trakt.tv/recommendations/shows?limit=15&ignore_collected=true', null, token, keys.traktClientId, function(stS, listS) {
+                    var moviesArr = (stM === 200 && listM && listM.length) ? listM : new Array();
+                    var showsArr = (stS === 200 && listS && listS.length) ? listS : new Array();
+                    var maxLen = Math.max(moviesArr.length, showsArr.length);
+                    var i;
+
+                    for (i = 0; i < maxLen && recSeeds.length < 20; i++) {
+                        if (i < moviesArr.length && moviesArr[i] && moviesArr[i].ids && moviesArr[i].ids.tmdb) {
+                            recSeeds.push({ tmdbId: parseInt(moviesArr[i].ids.tmdb, 10), isShow: false });
+                        }
+                        if (recSeeds.length < 20 && i < showsArr.length && showsArr[i] && showsArr[i].ids && showsArr[i].ids.tmdb) {
+                            recSeeds.push({ tmdbId: parseInt(showsArr[i].ids.tmdb, 10), isShow: true });
+                        }
+                    }
+
+                    if (recSeeds.length === 0) {
+                        done(new Array());
+                        return;
+                    }
+
+                    resolveTmdbCardsBatch(recSeeds, function(cards) {
+                        if (cards.length > 0 && window.Lampa && Lampa.Storage) {
+                            try {
+                                Lampa.Storage.set(TRAKT_RECS_CACHE_KEY, {
+                                    _ts: new Date().getTime(),
+                                    items: cards
+                                });
+                            } catch (eWrite) {
+                                /* ignore */
+                            }
+                        }
+                        done(cards);
+                    });
+                });
+            });
+        });
+    }
+
+    function registerTraktRecommendationsRow() {
+        try {
+            if (!window.Lampa || !Lampa.ContentRows || typeof Lampa.ContentRows.add !== 'function') return;
+
+            Lampa.ContentRows.add({
+                index: 1,
+                name: 'trakt_recommendations',
+                title: 'Рекомендовано Trakt для вас',
+                screen: new Array('main'),
+                call: function() {
+                    return function(call) {
+                        fetchTraktRecommendationsRow(function(items) {
+                            call({
+                                results: items,
+                                title: 'Рекомендовано Trakt для вас'
+                            });
+                        });
+                    };
+                }
+            });
+            logDebug('Полиця «Рекомендовано Trakt для вас» зареєстрована');
+        } catch (err) {
+            logDebug('ContentRows недоступний у цій версії Lampa:', err && err.message ? err.message : err);
+        }
     }
 
     function buildScrobblePayload(session, progressVal) {
@@ -1960,10 +2346,35 @@
             '  border-color: rgba(255, 255, 255, 0.85);' +
             '  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);' +
             '}' +
-            '.mdb-pill.active {' +
-            '  background: rgba(255, 255, 255, 0.26);' +
-            '  border-color: #ffffff;' +
-            '  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);' +
+
+            '.mdb-pill.active[data-reaction-key="masterpiece"] {' +
+            '  background: rgba(255, 107, 0, 0.38) !important;' +
+            '  border: 2px solid #ff9500 !important;' +
+            '  box-shadow: 0 0 16px rgba(255, 107, 0, 0.55) !important;' +
+            '}' +
+            '.mdb-pill.active[data-reaction-key="worth"] {' +
+            '  background: rgba(46, 204, 113, 0.35) !important;' +
+            '  border: 2px solid #2ecc71 !important;' +
+            '  box-shadow: 0 0 16px rgba(46, 204, 113, 0.5) !important;' +
+            '}' +
+            '.mdb-pill.active[data-reaction-key="once"] {' +
+            '  background: rgba(241, 196, 15, 0.32) !important;' +
+            '  border: 2px solid #f1c40f !important;' +
+            '  box-shadow: 0 0 16px rgba(241, 196, 15, 0.45) !important;' +
+            '}' +
+            '.mdb-pill.active[data-reaction-key="boring"] {' +
+            '  background: rgba(52, 152, 219, 0.35) !important;' +
+            '  border: 2px solid #3498db !important;' +
+            '  box-shadow: 0 0 16px rgba(52, 152, 219, 0.5) !important;' +
+            '}' +
+            '.mdb-pill.active[data-reaction-key="weak"] {' +
+            '  background: rgba(231, 76, 60, 0.35) !important;' +
+            '  border: 2px solid #e74c3c !important;' +
+            '  box-shadow: 0 0 16px rgba(231, 76, 60, 0.5) !important;' +
+            '}' +
+            '.mdb-pill.active .mdb-pill-count {' +
+            '  color: #ffffff !important;' +
+            '  font-weight: 700 !important;' +
             '}' +
 
             '.mdb-pill-icon {' +
@@ -2861,6 +3272,8 @@
         var toggles = new Array(
             { key: 'trakt_auto_scrobble', title: 'Автоматичний скробблінг у плеєрі' },
             { key: 'trakt_show_watched', title: 'Показувати бейдж «Переглянуто»' },
+            { key: 'trakt_sync_watchlist', title: 'Синхронізувати закладки з Trakt Watchlist' },
+            { key: 'trakt_show_recs', title: 'Полиця «Рекомендовано Trakt» на головній' },
             { key: 'mdb_use_png_emojis', title: 'Глянцеві 3D-іконки емодзі' },
             { key: 'mdb_emoji_glow', title: 'Кольорове світіння емодзі' },
             { key: 'mdb_emoji_anim', title: 'Анімація емодзі при наведенні' },
@@ -2893,6 +3306,27 @@
         Lampa.SettingsApi.addParam({
             component: PLUGIN_COMPONENT,
             param: {
+                name: 'trakt_sync_watchlist_btn',
+                type: 'button'
+            },
+            field: {
+                name: 'Синхронізувати Watchlist зараз',
+                description: 'Двостороння синхронізація закладок Lampa та Trakt Watchlist'
+            },
+            onChange: function() {
+                if (!isTraktLoggedIn()) {
+                    if (window.Lampa && Lampa.Noty) {
+                        Lampa.Noty.show('Спочатку увійдіть у Trakt');
+                    }
+                    return;
+                }
+                runTwoWayWatchlistSync(true);
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
                 name: 'mdb_clear_cache_btn',
                 type: 'button'
             },
@@ -2911,9 +3345,9 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.3.1',
+                version: '1.4.0',
                 name: 'Trakt & Рейтинги',
-                description: 'Синхронізація Trakt, скробблінг 80%, живі реакції та рейтинги з 7 платформ',
+                description: 'Синхронізація Trakt, скробблінг 80%, Watchlist, рекомендації, живі реакції та рейтинги з 7 платформ',
                 component: PLUGIN_COMPONENT
             });
         }
@@ -3064,6 +3498,8 @@
         registerSettings();
         attachFullListener();
         attachPlayerScrobbler();
+        attachWatchlistListeners();
+        registerTraktRecommendationsRow();
     }
 
     if (window.appready) {

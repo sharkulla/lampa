@@ -1,3 +1,5 @@
+
+```javascript
 (function() {
     'use strict';
 
@@ -140,6 +142,8 @@
             scale: getStorageStr('mdb_scale', '1.0'),
             titleSize: getStorageStr('mdb_title_size', 'default'),
             taglineSize: getStorageStr('mdb_tagline_size', 'compact'),
+            buttonsSize: getStorageStr('mdb_buttons_size', 'default'),
+            descSize: getStorageStr('mdb_desc_size', 'default'),
             autoScrobble: getStorageBoolTrueDefault('trakt_auto_scrobble'),
             showWatchedBadge: getStorageBoolTrueDefault('trakt_show_watched'),
             syncWatchlist: getStorageBoolTrueDefault('trakt_sync_watchlist'),
@@ -2217,6 +2221,13 @@
             '.mdb-tagline-small { font-size: 0.9em !important; opacity: 0.75 !important; }' +
             '.mdb-tagline-hidden { display: none !important; }' +
 
+            '.mdb-buttons-compact .full-start__button { font-size: 0.88em !important; }' +
+            '.mdb-buttons-small .full-start__button { font-size: 0.78em !important; }' +
+
+            '.mdb-desc-compact { font-size: 1.05em !important; line-height: 1.38 !important; }' +
+            '.mdb-desc-small { font-size: 0.92em !important; line-height: 1.32 !important; }' +
+            '.mdb-desc-hidden { display: none !important; }' +
+
             '.mdb-reactions-wrapper {' +
             '  position: relative;' +
             '  z-index: 2;' +
@@ -2229,6 +2240,15 @@
             '.mdb-reactions-wrapper.mdb-scale-085 { zoom: 0.85; }' +
             '.mdb-reactions-wrapper.mdb-scale-10 { zoom: 1; }' +
             '.mdb-reactions-wrapper.mdb-scale-115 { zoom: 1.15; }' +
+
+            'body.cardify .mdb-reactions-wrapper, .cardify .mdb-reactions-wrapper, body.cardify .mdb-pills-row, .cardify .mdb-pills-row {' +
+            '  overflow: visible !important;' +
+            '}' +
+            'body.cardify .mdb-pill-btn:first-child .mdb-tooltip, .cardify .mdb-pill-btn:first-child .mdb-tooltip {' +
+            '  left: 0 !important;' +
+            '  right: auto !important;' +
+            '  transform: none !important;' +
+            '}' +
 
             '.mdb-watched-row {' +
             '  display: flex !important;' +
@@ -2266,34 +2286,27 @@
             '.mdb-trakt-watched-btn svg {' +
             '  width: 1.35em;' +
             '  height: 1.35em;' +
+            '  flex-shrink: 0;' +
             '  display: block;' +
             '}' +
-            '.mdb-trakt-watched-btn.is-watched {' +
-            '  color: #69f0ae;' +
-            '  border-color: rgba(46, 204, 113, 0.55);' +
-            '  background: rgba(46, 204, 113, 0.16);' +
-            '}' +
-            '.mdb-btn-tooltip {' +
-            '  position: absolute;' +
-            '  bottom: calc(100% + 8px);' +
-            '  left: 50%;' +
-            '  transform: translateX(-50%) translateY(4px);' +
-            '  background: rgba(20, 22, 27, 0.96);' +
-            '  color: #ffffff;' +
-            '  border: 1px solid rgba(255, 255, 255, 0.18);' +
-            '  border-radius: 6px;' +
-            '  padding: 0.25em 0.6em;' +
-            '  font-size: 0.78em;' +
-            '  font-weight: 500;' +
+            '.mdb-trakt-watched-btn > span {' +
+            '  display: none;' +
             '  white-space: nowrap;' +
-            '  pointer-events: none;' +
-            '  opacity: 0;' +
-            '  transition: opacity 0.15s ease, transform 0.15s ease;' +
-            '  z-index: 25;' +
             '}' +
-            '.mdb-trakt-watched-btn.focus .mdb-btn-tooltip, .mdb-trakt-watched-btn:hover .mdb-btn-tooltip {' +
-            '  opacity: 1;' +
-            '  transform: translateX(-50%) translateY(0);' +
+            '.mdb-trakt-watched-btn.is-watched {' +
+            '  background: rgba(255, 255, 255, 0.22);' +
+            '  border: 1.5px solid rgba(255, 255, 255, 0.85);' +
+            '  color: #ffffff;' +
+            '}' +
+            '.mdb-trakt-watched-btn.focus, .mdb-trakt-watched-btn:hover {' +
+            '  background: #ffffff !important;' +
+            '  border-color: #ffffff !important;' +
+            '  color: #000000 !important;' +
+            '}' +
+            '.mdb-trakt-watched-btn.focus > span, .mdb-trakt-watched-btn:hover > span {' +
+            '  display: inline-block;' +
+            '  margin-left: 0.45em;' +
+            '  color: #000000;' +
             '}' +
 
             '.mdb-pills-row {' +
@@ -2604,7 +2617,7 @@
         document.head.appendChild(styleEl);
     }
 
-    function applyTitleAndTaglineStyles(rootEl, settings) {
+    function applyCardTypographyAndButtonStyles(rootEl, settings) {
         if (!rootEl || !rootEl.querySelectorAll) return;
 
         var titleNodes = rootEl.querySelectorAll('.full-start__title, .full-start-new__title');
@@ -2627,6 +2640,27 @@
             gNode.classList.remove('mdb-tagline-hidden');
             if (settings.taglineSize && settings.taglineSize !== 'default') {
                 gNode.classList.add('mdb-tagline-' + settings.taglineSize);
+            }
+        }
+
+        var btnRows = rootEl.querySelectorAll('.full-start__buttons, .full-start-new__buttons');
+        for (i = 0; i < btnRows.length; i++) {
+            var bRow = btnRows[i];
+            bRow.classList.remove('mdb-buttons-compact');
+            bRow.classList.remove('mdb-buttons-small');
+            if (settings.buttonsSize && settings.buttonsSize !== 'default') {
+                bRow.classList.add('mdb-buttons-' + settings.buttonsSize);
+            }
+        }
+
+        var descNodes = rootEl.querySelectorAll('.full-start__description, .full-start-new__description');
+        for (i = 0; i < descNodes.length; i++) {
+            var dNode = descNodes[i];
+            dNode.classList.remove('mdb-desc-compact');
+            dNode.classList.remove('mdb-desc-small');
+            dNode.classList.remove('mdb-desc-hidden');
+            if (settings.descSize && settings.descSize !== 'default') {
+                dNode.classList.add('mdb-desc-' + settings.descSize);
             }
         }
     }
@@ -2705,10 +2739,7 @@
             } else {
                 btn.classList.remove('is-watched');
             }
-            var tipText = watchedState ? 'Видалити з переглянутих' : 'Позначити переглянутим';
-            btn.setAttribute('title', tipText);
-            btn.innerHTML = getWatchedActionSvg(watchedState) +
-                '<span class="mdb-btn-tooltip">' + tipText + '</span>';
+            btn.innerHTML = getWatchedActionSvg(watchedState) + '<span>Переглянуто</span>';
         };
 
         updateBtnVisual(isCurrentlyWatched);
@@ -2813,11 +2844,11 @@
                 for (i = 0; i < sortedPills.length; i++) {
                     (function(item) {
                         var pill = document.createElement('div');
-                        pill.className = 'mdb-pill lampa-pill-btn selector' + (item.isSelected ? ' active' : '');
+                        pill.className = 'mdb-pill lampa-pill-btn mdb-pill-btn selector' + (item.isSelected ? ' active' : '');
                         pill.setAttribute('data-reaction-key', item.key);
 
                         var tooltip = document.createElement('span');
-                        tooltip.className = 'mdb-pill-tooltip';
+                        tooltip.className = 'mdb-pill-tooltip mdb-tooltip';
                         tooltip.textContent = item.label + hintSuffix;
 
                         var iconWrap = document.createElement('span');
@@ -3060,7 +3091,7 @@
 
         var settings = getSettings();
         hideDefaultCardRates(rootEl);
-        applyTitleAndTaglineStyles(rootEl, settings);
+        applyCardTypographyAndButtonStyles(rootEl, settings);
 
         var oldWrappers = rootEl.querySelectorAll('.mdb-reactions-wrapper');
         var i;
@@ -3217,6 +3248,43 @@
         Lampa.SettingsApi.addParam({
             component: PLUGIN_COMPONENT,
             param: {
+                name: 'mdb_buttons_size',
+                type: 'select',
+                values: {
+                    'default': 'Стандартний (Lampa)',
+                    compact: 'Компактний',
+                    small: 'Малий'
+                },
+                default: 'default'
+            },
+            field: {
+                name: 'Розмір нижніх кнопок дій',
+                description: 'Пропорційний масштаб кнопок дій під блоком рейтингів'
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
+                name: 'mdb_desc_size',
+                type: 'select',
+                values: {
+                    'default': 'Стандартний (Lampa)',
+                    compact: 'Компактний',
+                    small: 'Малий',
+                    hidden: 'Приховати опис'
+                },
+                default: 'default'
+            },
+            field: {
+                name: 'Розмір опису (сюжету) фільму',
+                description: 'Розмір або приховування тексту опису на сторінці фільму'
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
                 name: 'mdb_pill_style',
                 type: 'select',
                 values: {
@@ -3345,7 +3413,7 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.4.0',
+                version: '1.4.1',
                 name: 'Trakt & Рейтинги',
                 description: 'Синхронізація Trakt, скробблінг 80%, Watchlist, рекомендації, живі реакції та рейтинги з 7 платформ',
                 component: PLUGIN_COMPONENT
@@ -3376,7 +3444,7 @@
 
                 if (rootEl) {
                     hideDefaultCardRates(rootEl);
-                    applyTitleAndTaglineStyles(rootEl, settings);
+                    applyCardTypographyAndButtonStyles(rootEl, settings);
                 }
 
                 if (cachedData) {

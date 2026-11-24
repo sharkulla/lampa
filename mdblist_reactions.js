@@ -4172,7 +4172,7 @@
 
             '.mdb-ratings-style-glass .mdb-rating-item,' +
             '.mdb-ratings-style-solid .mdb-rating-item,' +
-            '.mdb-ratings-style-outline .mdb-rating
+            '.mdb-ratings-style-outline .mdb-rating-item,' +
             '.mdb-ratings-style-compact .mdb-rating-item,' +
             '.mdb-ratings-style-neon .mdb-rating-item,' +
             '.mdb-ratings-style-graphite .mdb-rating-item,' +

@@ -2089,39 +2089,12 @@
 
     function openNativeBookmarksView() {
         if (!window.Lampa || !Lampa.Activity || typeof Lampa.Activity.push !== 'function') return;
-        var books = getLocalBookmarks();
-
-        if (Lampa.Api && Lampa.Api.sources) {
-            var baseSrc = Lampa.Api.sources.tmdb || {};
-            var bmSrc = {};
-            var k;
-            for (k in baseSrc) {
-                if (Object.prototype.hasOwnProperty.call(baseSrc, k)) {
-                    bmSrc[k] = baseSrc[k];
-                }
-            }
-            bmSrc.list = function(params, oncompl) {
-                var freshBooks = getLocalBookmarks();
-                if (typeof oncompl === 'function') {
-                    oncompl({
-                        results: freshBooks,
-                        page: 1,
-                        total_pages: 1
-                    });
-                }
-            };
-            bmSrc.category = bmSrc.list;
-            Lampa.Api.sources.mdb_bookmarks_src = bmSrc;
-        }
-
         Lampa.Activity.push({
-            url: 'bookmarks',
+            url: '',
             title: loc('Закладки', 'Закладки'),
-            component: 'category_full',
-            source: 'mdb_bookmarks_src',
-            results: books,
-            page: 1,
-            total_pages: 1
+            component: 'bookmarks',
+            type: 'book',
+            page: 1
         });
     }
 

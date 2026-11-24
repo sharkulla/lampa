@@ -2089,17 +2089,40 @@
 
     function openNativeBookmarksView() {
         if (!window.Lampa || !Lampa.Activity || typeof Lampa.Activity.push !== 'function') return;
-        var pushObj = {
-            url: '',
-            title: loc('Закладки', 'Закладки'),
-            component: 'favorite',
-            type: 'book',
-            page: 1
-        };
-        if (window.Lampa.Api && Lampa.Api.sources && Lampa.Api.sources.favorite) {
-            pushObj.source = 'favorite';
+        var books = getLocalBookmarks();
+
+        if (Lampa.Api && Lampa.Api.sources) {
+            var baseSrc = Lampa.Api.sources.tmdb || {};
+            var bmSrc = {};
+            var k;
+            for (k in baseSrc) {
+                if (Object.prototype.hasOwnProperty.call(baseSrc, k)) {
+                    bmSrc[k] = baseSrc[k];
+                }
+            }
+            bmSrc.list = function(params, oncompl) {
+                var freshBooks = getLocalBookmarks();
+                if (typeof oncompl === 'function') {
+                    oncompl({
+                        results: freshBooks,
+                        page: 1,
+                        total_pages: 1
+                    });
+                }
+            };
+            bmSrc.category = bmSrc.list;
+            Lampa.Api.sources.mdb_bookmarks_src = bmSrc;
         }
-        Lampa.Activity.push(pushObj);
+
+        Lampa.Activity.push({
+            url: 'bookmarks',
+            title: loc('Закладки', 'Закладки'),
+            component: 'category_full',
+            source: 'mdb_bookmarks_src',
+            results: books,
+            page: 1,
+            total_pages: 1
+        });
     }
 
     function registerBookmarksRow() {
@@ -2308,25 +2331,24 @@
             if (!e) return;
             if (e.where !== 'book' && e.type !== 'book') return;
             var card = e.card || e.data || null;
+            if (card && card.id) {
+                var lineEl = findBookmarksItemsLine();
+                if (lineEl) {
+                    var cards = lineEl.querySelectorAll('.card');
+                    var idx;
+                    for (idx = 0; idx < cards.length; idx++) {
+                        var itemData = window.$ ? window.$(cards[idx]).data('item') : null;
+                        if (itemData && Number(itemData.id) === Number(card.id) && cards[idx].parentNode) {
+                            cards[idx].parentNode.removeChild(cards[idx]);
+                        }
+                    }
+                }
+            }
             applyBookmarksShelfVisibility();
             if (card && !watchlistSyncLock) {
                 pushBookmarkToTraktWatchlist(card, false);
             }
         };
-
-        if (Lampa.Favorite && Lampa.Favorite.listener && typeof Lampa.Favorite.listener.follow === 'function') {
-            Lampa.Favorite.listener.follow('add', onBookAdded);
-            Lampa.Favorite.listener.follow('added', onBookAdded);
-            Lampa.Favorite.listener.follow('remove', onBookRemoved);
-            Lampa.Favorite.listener.follow('removed', onBookRemoved);
-        }
-
-        window.setTimeout(function() {
-            if (isTraktLoggedIn() && getSettings().syncWatchlist) {
-                runTwoWayWatchlistSync(false);
-            }
-        }, 3000);
-    }
 
     function buildScrobblePayload(session, progressVal) {
         var idsObj = {

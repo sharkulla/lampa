@@ -2091,9 +2091,8 @@
         if (!window.Lampa || !Lampa.Activity || typeof Lampa.Activity.push !== 'function') return;
         Lampa.Activity.push({
             url: '',
-            title: loc('Закладки', 'Закладки'),
-            component: 'bookmarks',
-            type: 'book',
+            title: loc('Вибране', 'Избранное'),
+            component: 'favorite',
             page: 1
         });
     }

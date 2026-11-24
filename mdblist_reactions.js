@@ -4722,7 +4722,7 @@
                         state.apiError = 'NO_KEY';
                     } else if (errSummary || !json || !hasValidPositiveRatings(json.ratings)) {
                         state.apiError = errSummary || loc('Порожній масив ratings', 'Пустой массив ratings');
-                        logDebug('MDBList API помилка:', state.apiError
+                        logDebug('MDBList API помилка:', state.apiError;
                     } else {
                         state.apiError = '';
                         state.ratings = json.ratings;

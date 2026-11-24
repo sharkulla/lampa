@@ -25,6 +25,7 @@
     var watchlistSyncLock = false;
     var historyImportInProgress = false;
     var authButtonFieldRef = null;
+    var bookmarksRefreshTimer = null;
 
     var lastRenderedCard = {
         rootEl: null,
@@ -48,11 +49,18 @@
         lastTickTs: 0
     };
 
+    var EMOJI_PACK_BASES = {
+        apple: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/',
+        google: 'https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/',
+        twitter: 'https://cdn.jsdelivr.net/npm/emoji-datasource-twitter@15.1.2/img/twitter/64/',
+        facebook: 'https://cdn.jsdelivr.net/npm/emoji-datasource-facebook@15.1.2/img/facebook/64/'
+    };
+
     var REACTION_DEFS = new Array(
         {
             key: 'masterpiece',
             emoji: '🔥',
-            png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f525.png',
+            hex: '1f525',
             barColor: 'rgba(255, 94, 20, 0.85)',
             traktScore: 10,
             labelUk: 'Шедевр (5★ Trakt)',
@@ -62,7 +70,7 @@
         {
             key: 'worth',
             emoji: '👍',
-            png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f44d.png',
+            hex: '1f44d',
             barColor: 'rgba(255, 204, 0, 0.85)',
             traktScore: 8,
             labelUk: 'Варто глянути (4★ Trakt)',
@@ -72,7 +80,7 @@
         {
             key: 'once',
             emoji: '🤔',
-            png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f914.png',
+            hex: '1f914',
             barColor: 'rgba(255, 193, 7, 0.78)',
             traktScore: 6,
             labelUk: 'На один раз (3★ Trakt)',
@@ -82,7 +90,7 @@
         {
             key: 'boring',
             emoji: '😴',
-            png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f634.png',
+            hex: '1f634',
             barColor: 'rgba(100, 149, 237, 0.85)',
             traktScore: 4,
             labelUk: 'Нудно (2★ Trakt)',
@@ -92,7 +100,7 @@
         {
             key: 'weak',
             emoji: '💩',
-            png: 'https://cdn.jsdelivr.net/npm/emoji-datasource-apple@15.1.2/img/apple/64/1f4a9.png',
+            hex: '1f4a9',
             barColor: 'rgba(181, 115, 65, 0.85)',
             traktScore: 2,
             labelUk: 'Слабко (1★ Trakt)',
@@ -165,6 +173,26 @@
             '1.6': '160%',
             '1.7': '170%',
             '1.8': '180%'
+        };
+    }
+
+    function getEmojiPackOptions() {
+        return {
+            apple: loc('Apple iOS (Глянцевий 3D)', 'Apple iOS (Глянцевый 3D)'),
+            google: loc('Google Noto (Android Стиль)', 'Google Noto (Android Стиль)'),
+            twitter: loc('Twemoji (Плоский векторний)', 'Twemoji (Плоский векторный)'),
+            facebook: loc('Facebook (Насичений глянець)', 'Facebook (Насыщенный глянец)'),
+            unicode: loc('Системні емодзі (Шрифтові)', 'Системные эмодзи (Шрифтовые)')
+        };
+    }
+
+    function getRatingsFormatOptions() {
+        return {
+            full: loc('Повний (Бал + % + кількість голосів 100K)', 'Полный (Балл + % + количество голосов 100K)'),
+            no_votes: loc('Без кількості голосів (Тільки бал і %)', 'Без количества голосов (Только балл и %)'),
+            clean_numbers: loc('Тільки чисті цифри (Без % і без голосів)', 'Только чистые цифры (Без % и без голосов)'),
+            scale_10: loc('Єдина 10-бальна шкала (Усе у форматі X.X)', 'Единая 10-балльная шкала (Всё в формате X.X)'),
+            minimal_row: loc('Мінімалізм без рамок (Чисті цифри в рядок)', 'Минимализм без рамок (Чистые цифры в строку)')
         };
     }
 
@@ -258,11 +286,24 @@
         };
     }
 
+    function getResolvedEmojiPack() {
+        var pack = getStorageStr('mdb_emoji_pack', '');
+        if (pack && (pack === 'unicode' || EMOJI_PACK_BASES[pack])) {
+            return pack;
+        }
+        if (!getStorageBoolTrueDefault('mdb_use_png_emojis')) {
+            return 'unicode';
+        }
+        return 'apple';
+    }
+
     function getSettings() {
         return {
             pillStyle: getStorageStr('mdb_pill_style', 'glass'),
             ratingsStyle: getStorageStr('mdb_ratings_style', 'clean'),
+            ratingsFormat: getStorageStr('mdb_ratings_format', 'full'),
             badgeStyle: getStorageStr('mdb_badge_style', 'original'),
+            emojiPack: getResolvedEmojiPack(),
             scaleBadges: getScaleValue('mdb_scale_badges'),
             scalePills: getScaleValue('mdb_scale_pills'),
             scaleRatings: getScaleValue('mdb_scale_ratings'),
@@ -271,7 +312,6 @@
             showAwards: getStorageBoolTrueDefault('mdb_show_awards'),
             syncWatchlist: getStorageBoolTrueDefault('trakt_sync_watchlist'),
             showBookmarksRow: getStorageBoolTrueDefault('mdb_show_bookmarks_row'),
-            usePngEmojis: getStorageBoolTrueDefault('mdb_use_png_emojis'),
             emojiGlow: getStorageBoolTrueDefault('mdb_emoji_glow'),
             emojiAnim: getStorageBoolTrueDefault('mdb_emoji_anim'),
             emojiBar: getStorageBoolTrueDefault('mdb_emoji_bar'),
@@ -2036,15 +2076,13 @@
         return null;
     }
 
-    function getDomCardIdAndTitle(cardEl) {
+    function getDomCardId(cardEl) {
         var cardId = 0;
-        var cardTitle = '';
         try {
             if (window.$) {
                 var jqData = window.$(cardEl).data('card');
                 if (jqData && jqData.id) {
                     cardId = parseInt(jqData.id, 10) || 0;
-                    cardTitle = trimStr(jqData.title || jqData.name || '');
                 }
             }
         } catch (eJq) {
@@ -2052,61 +2090,15 @@
         }
         if (!cardId && cardEl.card_data && cardEl.card_data.id) {
             cardId = parseInt(cardEl.card_data.id, 10) || 0;
-            cardTitle = trimStr(cardEl.card_data.title || cardEl.card_data.name || '');
         }
-        if (!cardTitle) {
-            var tEl = cardEl.querySelector('.card__title');
-            if (tEl) cardTitle = trimStr(tEl.textContent);
+        if (!cardId && cardEl.getAttribute) {
+            var attrId = parseInt(cardEl.getAttribute('data-mdb-bm-id'), 10);
+            if (!isNaN(attrId) && attrId > 0) cardId = attrId;
         }
-        return { id: cardId, title: cardTitle };
+        return cardId;
     }
 
-    function removeCardFromBookmarksShelfDom(card) {
-        if (!card || !card.id) return;
-        var targetId = parseInt(card.id, 10);
-        var targetTitle = trimStr(card.title || card.name || '');
-        var lineEl = findBookmarksItemsLine();
-        if (!lineEl) return;
-
-        var cards = lineEl.querySelectorAll('.card');
-        var i;
-        for (i = 0; i < cards.length; i++) {
-            var info = getDomCardIdAndTitle(cards[i]);
-            if ((info.id && info.id === targetId) || (targetTitle && info.title === targetTitle)) {
-                if (cards[i].parentNode) {
-                    cards[i].parentNode.removeChild(cards[i]);
-                }
-            }
-        }
-
-        var remainingBooks = getLocalBookmarks();
-        var remainingDom = lineEl.querySelectorAll('.card').length;
-        if (remainingBooks.length === 0 || remainingDom === 0 || !getSettings().showBookmarksRow) {
-            lineEl.style.display = 'none';
-        }
-    }
-
-    function addCardToBookmarksShelfDom(card) {
-        if (!card || !card.id) return;
-        if (!getSettings().showBookmarksRow) return;
-
-        var lineEl = findBookmarksItemsLine();
-        if (!lineEl) return;
-
-        lineEl.style.display = '';
-        var scrollBody = lineEl.querySelector('.scroll__body');
-        if (!scrollBody) return;
-
-        var targetId = parseInt(card.id, 10);
-        var existingCards = scrollBody.querySelectorAll('.card');
-        var i;
-        for (i = 0; i < existingCards.length; i++) {
-            var info = getDomCardIdAndTitle(existingCards[i]);
-            if (info.id && info.id === targetId) {
-                return;
-            }
-        }
-
+    function buildLampaCardElement(card) {
         try {
             var cardObj = null;
             if (window.Lampa && Lampa.Maker && typeof Lampa.Maker.make === 'function') {
@@ -2131,24 +2123,143 @@
                 var rendered = typeof cardObj.render === 'function' ? cardObj.render() : null;
                 var domNode = rendered ? (rendered.jquery ? rendered[0] : rendered) : null;
                 if (domNode) {
-                    if (scrollBody.firstChild) {
-                        scrollBody.insertBefore(domNode, scrollBody.firstChild);
-                    } else {
-                        scrollBody.appendChild(domNode);
+                    if (domNode.setAttribute) {
+                        domNode.setAttribute('data-mdb-bm-id', String(card.id));
                     }
+                    return domNode;
                 }
             }
         } catch (err) {
             /* ignore native card creation errors */
         }
+        return null;
     }
 
-    function applyBookmarksShelfVisibility() {
-        var lineEl = findBookmarksItemsLine();
-        if (!lineEl) return;
-        var settings = getSettings();
-        var books = getLocalBookmarks();
-        lineEl.style.display = (settings.showBookmarksRow && books.length > 0) ? '' : 'none';
+    function ensureBookmarksLineCreatedOnMain() {
+        var existing = findBookmarksItemsLine();
+        if (existing) return existing;
+
+        try {
+            if (!window.Lampa || !Lampa.Activity || typeof Lampa.Activity.active !== 'function') return null;
+            var active = Lampa.Activity.active();
+            if (!active || active.component !== 'main' || !active.activity || typeof active.activity.render !== 'function') {
+                return null;
+            }
+            var mainNode = active.activity.render();
+            var mainEl = mainNode ? (mainNode.jquery ? mainNode[0] : mainNode) : null;
+            if (!mainEl) return null;
+
+            var mainScrollBody = mainEl.querySelector('.scroll__body');
+            if (!mainScrollBody) return null;
+
+            var books = getLocalBookmarks();
+            if (!books.length || !getSettings().showBookmarksRow) return null;
+
+            if (typeof Lampa.InteractionLine === 'function') {
+                var rowTitle = loc('Закладки', 'Закладки');
+                var lineComp = new Lampa.InteractionLine({
+                    results: books.slice(0, 20),
+                    title: rowTitle,
+                    total_pages: 2,
+                    onMore: openNativeBookmarksView
+                });
+                if (typeof lineComp.create === 'function') {
+                    lineComp.create();
+                    var lineRendered = typeof lineComp.render === 'function' ? lineComp.render() : null;
+                    var lineDom = lineRendered ? (lineRendered.jquery ? lineRendered[0] : lineRendered) : null;
+                    if (lineDom) {
+                        var refLines = mainScrollBody.querySelectorAll('.items-line');
+                        if (refLines.length > 1 && refLines[1].parentNode === mainScrollBody) {
+                            mainScrollBody.insertBefore(lineDom, refLines[1]);
+                        } else {
+                            mainScrollBody.appendChild(lineDom);
+                        }
+                        return lineDom;
+                    }
+                }
+            }
+        } catch (err) {
+            /* ignore InteractionLine creation errors */
+        }
+
+        return findBookmarksItemsLine();
+    }
+
+    function refreshBookmarksShelfLive() {
+        try {
+            var settings = getSettings();
+            var books = getLocalBookmarks();
+            var targetItems = books.slice(0, 20);
+            var lineEl = findBookmarksItemsLine();
+
+            if (!settings.showBookmarksRow || targetItems.length === 0) {
+                if (lineEl) {
+                    var clearCards = lineEl.querySelectorAll('.card:not(.card--more)');
+                    var k;
+                    for (k = 0; k < clearCards.length; k++) {
+                        if (clearCards[k].parentNode) {
+                            clearCards[k].parentNode.removeChild(clearCards[k]);
+                        }
+                    }
+                    lineEl.style.display = 'none';
+                }
+                return;
+            }
+
+            if (!lineEl) {
+                lineEl = ensureBookmarksLineCreatedOnMain();
+                if (!lineEl) return;
+            }
+
+            lineEl.style.display = '';
+            var scrollBody = lineEl.querySelector('.scroll__body');
+            if (!scrollBody) return;
+
+            var existingCards = scrollBody.querySelectorAll('.card:not(.card--more)');
+            var needsRebuild = (existingCards.length !== targetItems.length);
+            var i;
+
+            if (!needsRebuild) {
+                for (i = 0; i < existingCards.length; i++) {
+                    if (getDomCardId(existingCards[i]) !== Number(targetItems[i].id)) {
+                        needsRebuild = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!needsRebuild) return;
+
+            var moreCard = scrollBody.querySelector('.card--more');
+            for (i = 0; i < existingCards.length; i++) {
+                if (existingCards[i].parentNode) {
+                    existingCards[i].parentNode.removeChild(existingCards[i]);
+                }
+            }
+
+            for (i = 0; i < targetItems.length; i++) {
+                var domCard = buildLampaCardElement(targetItems[i]);
+                if (domCard) {
+                    if (moreCard && moreCard.parentNode === scrollBody) {
+                        scrollBody.insertBefore(domCard, moreCard);
+                    } else {
+                        scrollBody.appendChild(domCard);
+                    }
+                }
+            }
+        } catch (err) {
+            /* ignore live shelf refresh errors */
+        }
+    }
+
+    function scheduleBookmarksLiveRefresh() {
+        if (bookmarksRefreshTimer) {
+            window.clearTimeout(bookmarksRefreshTimer);
+        }
+        bookmarksRefreshTimer = window.setTimeout(function() {
+            bookmarksRefreshTimer = null;
+            refreshBookmarksShelfLive();
+        }, 40);
     }
 
     function openNativeBookmarksView() {
@@ -2207,7 +2318,7 @@
             /* ignore */
         }
         registerBookmarksRow();
-        applyBookmarksShelfVisibility();
+        refreshBookmarksShelfLive();
     }
 
     function pushBookmarkToTraktWatchlist(card, isAdd) {
@@ -2333,7 +2444,6 @@
                                 watchlistSyncLock = true;
                                 try {
                                     Lampa.Favorite.add('book', cards[k]);
-                                    addCardToBookmarksShelfDom(cards[k]);
                                 } catch (errAdd) {
                                     /* ignore */
                                 } finally {
@@ -2341,7 +2451,7 @@
                                 }
                             }
                         }
-                        applyBookmarksShelfVisibility();
+                        scheduleBookmarksLiveRefresh();
                         logDebug('Синхронізовано закладок із Trakt Watchlist:', cards.length);
                         if (showSuccessToast && window.Lampa && Lampa.Noty) {
                             Lampa.Noty.show(loc('Watchlist Trakt синхронізовано', 'Watchlist Trakt синхронизирован'));
@@ -2353,30 +2463,56 @@
     }
 
     function attachWatchlistListeners() {
-        if (!window.Lampa || !Lampa.Favorite || !Lampa.Favorite.listener) return;
+        if (!window.Lampa) return;
 
-        if (typeof Lampa.Favorite.listener.follow === 'function') {
-            Lampa.Favorite.listener.follow('add', function(e) {
-                if (!e) return;
-                if (e.where !== 'book' && e.type !== 'book') return;
-                var card = e.card || e.data || null;
-                if (card) {
-                    addCardToBookmarksShelfDom(card);
-                    if (!watchlistSyncLock) {
-                        pushBookmarkToTraktWatchlist(card, true);
-                    }
-                }
-            });
+        var onBookAdded = function(e) {
+            if (!e) return;
+            if (e.where && e.where !== 'book' && e.type && e.type !== 'book') return;
+            if (!e.where && !e.type) return;
+            if ((e.where && e.where !== 'book') && (e.type && e.type !== 'book')) return;
+            if (e.where !== 'book' && e.type !== 'book') return;
 
-            Lampa.Favorite.listener.follow('remove', function(e) {
-                if (!e) return;
-                if (e.where !== 'book' && e.type !== 'book') return;
-                var card = e.card || e.data || null;
-                if (card) {
-                    removeCardFromBookmarksShelfDom(card);
-                    if (!watchlistSyncLock) {
-                        pushBookmarkToTraktWatchlist(card, false);
-                    }
+            var card = e.card || e.data || null;
+            scheduleBookmarksLiveRefresh();
+            if (card && !watchlistSyncLock) {
+                pushBookmarkToTraktWatchlist(card, true);
+            }
+        };
+
+        var onBookRemoved = function(e) {
+            if (!e) return;
+            if (e.where !== 'book' && e.type !== 'book') return;
+
+            var card = e.card || e.data || null;
+            scheduleBookmarksLiveRefresh();
+            if (card && !watchlistSyncLock) {
+                pushBookmarkToTraktWatchlist(card, false);
+            }
+        };
+
+        if (Lampa.Favorite && Lampa.Favorite.listener && typeof Lampa.Favorite.listener.follow === 'function') {
+            Lampa.Favorite.listener.follow('add', onBookAdded);
+            Lampa.Favorite.listener.follow('added', onBookAdded);
+            Lampa.Favorite.listener.follow('remove', onBookRemoved);
+            Lampa.Favorite.listener.follow('removed', onBookRemoved);
+        }
+
+        if (Lampa.Listener && typeof Lampa.Listener.follow === 'function') {
+            Lampa.Listener.follow('activity', function(e) {
+                if (!e || !e.type) return;
+                if (e.type === 'start' || e.type === 'backward' || e.type === 'destroy' || e.type === 'active') {
+                    window.setTimeout(function() {
+                        try {
+                            if (Lampa.Activity && typeof Lampa.Activity.active === 'function') {
+                                var active = Lampa.Activity.active();
+                                if (active && active.component === 'main') {
+                                    refreshBookmarksShelfLive();
+                                }
+                            }
+                        } catch (errAct) {
+                            /* ignore */
+                        }
+                    }, 60);
                 }
             });
         }
@@ -3082,28 +3218,42 @@
         return '<span class="mdb-text-badge" style="background:' + info.bg + ';color:' + info.fg + ';">' + info.label + '</span>';
     }
 
-    function formatRatingParts(sourceKey, r) {
+    function formatRatingParts(sourceKey, r, ratingsFormat) {
         var val = Number(r.value);
+        var fmt = ratingsFormat || 'full';
+
+        if (fmt === 'scale_10') {
+            var normalized = val;
+            if (sourceKey === 'letterboxd') {
+                normalized = val * 2;
+            } else if (sourceKey !== 'imdb') {
+                normalized = val / 10;
+            }
+            return { score: normalized.toFixed(1), denom: '' };
+        }
+
+        var showDenom = (fmt === 'full' || fmt === 'no_votes');
+
         if (sourceKey === 'imdb') {
-            return { score: val.toFixed(1), denom: '/10' };
+            return { score: val.toFixed(1), denom: showDenom ? '/10' : '' };
         }
         if (sourceKey === 'trakt') {
-            return { score: String(Math.round(val)), denom: '%' };
+            return { score: String(Math.round(val)), denom: showDenom ? '%' : '' };
         }
         if (sourceKey === 'tmdb') {
-            return { score: String(Math.round(val)), denom: '/100' };
+            return { score: String(Math.round(val)), denom: showDenom ? '/100' : '' };
         }
         if (sourceKey === 'letterboxd') {
-            return { score: val.toFixed(1), denom: '/5' };
+            return { score: val.toFixed(1), denom: showDenom ? '/5' : '' };
         }
         if (sourceKey === 'tomatoes') {
-            return { score: String(Math.round(val)), denom: '%' };
+            return { score: String(Math.round(val)), denom: showDenom ? '%' : '' };
         }
         if (sourceKey === 'popcorn') {
-            return { score: String(Math.round(val)), denom: '%' };
+            return { score: String(Math.round(val)), denom: showDenom ? '%' : '' };
         }
         if (sourceKey === 'metacritic') {
-            return { score: String(Math.round(val)), denom: '/100' };
+            return { score: String(Math.round(val)), denom: showDenom ? '/100' : '' };
         }
         return { score: String(val), denom: '' };
     }
@@ -3160,7 +3310,14 @@
         });
     }
 
-    function buildSortedPillsList(reactions, activeVote, bakedVote) {
+    function getEmojiImageUrl(packName, hexCode) {
+        if (!packName || packName === 'unicode') return '';
+        var base = EMOJI_PACK_BASES[packName];
+        if (!base) return '';
+        return base + hexCode + '.png';
+    }
+
+    function buildSortedPillsList(reactions, activeVote, bakedVote, emojiPack) {
         var list = new Array();
         var i;
         var baked = bakedVote || '';
@@ -3179,7 +3336,7 @@
             list.push({
                 key: def.key,
                 emoji: def.emoji,
-                png: def.png,
+                png: getEmojiImageUrl(emojiPack, def.hex),
                 barColor: def.barColor,
                 label: getReactionLabel(def),
                 order: def.order,
@@ -3627,6 +3784,16 @@
             '  box-shadow: 0 0.25em 0.85em rgba(0, 0, 0, 0.38);' +
             '}' +
 
+            '.mdb-ratings-format-minimal_row .mdb-rating-item {' +
+            '  background: transparent !important;' +
+            '  border: none !important;' +
+            '  box-shadow: none !important;' +
+            '  backdrop-filter: none !important;' +
+            '  -webkit-backdrop-filter: none !important;' +
+            '  padding: 0 !important;' +
+            '  border-radius: 0 !important;' +
+            '}' +
+
             '.mdb-rating-top {' +
             '  display: inline-flex;' +
             '  align-items: center;' +
@@ -3873,6 +4040,8 @@
                 }
             }
 
+            var showVotesSub = (settings.ratingsFormat === 'full');
+
             for (rIdx = 0; rIdx < PLATFORM_ORDER.length; rIdx++) {
                 var srcKey = PLATFORM_ORDER[rIdx];
                 if (!isPlatformEnabled(srcKey, settings)) continue;
@@ -3882,7 +4051,7 @@
                 var numVal = Number(ratingObj.value);
                 if (isNaN(numVal) || numVal <= 0) continue;
 
-                var parts = formatRatingParts(srcKey, ratingObj);
+                var parts = formatRatingParts(srcKey, ratingObj, settings.ratingsFormat);
                 var badgeHtml = settings.badgeStyle === 'text_badges'
                     ? createTextBadge(srcKey)
                     : createSvgLogo(srcKey, numVal);
@@ -3904,18 +4073,21 @@
                 scoreValEl.className = 'mdb-score-val';
                 scoreValEl.textContent = parts.score;
 
-                var scoreDenomEl = document.createElement('span');
-                scoreDenomEl.className = 'mdb-score-denom';
-                scoreDenomEl.textContent = parts.denom;
-
                 scoreGroup.appendChild(scoreValEl);
-                scoreGroup.appendChild(scoreDenomEl);
+
+                if (parts.denom) {
+                    var scoreDenomEl = document.createElement('span');
+                    scoreDenomEl.className = 'mdb-score-denom';
+                    scoreDenomEl.textContent = parts.denom;
+                    scoreGroup.appendChild(scoreDenomEl);
+                }
+
                 topEl.appendChild(iconWrap);
                 topEl.appendChild(scoreGroup);
                 itemEl.appendChild(topEl);
 
                 var votesNum = Number(ratingObj.votes) || 0;
-                if (votesNum > 0) {
+                if (showVotesSub && votesNum > 0) {
                     var votesEl = document.createElement('div');
                     votesEl.className = 'mdb-votes-sub';
                     votesEl.textContent = formatVotesText(votesNum);
@@ -3955,7 +4127,7 @@
                 ? (data.userTraktVote !== undefined ? data.userTraktVote : '')
                 : getUserLocalVote(mediaVoteKey);
             var bakedVote = data.bakedVote || '';
-            var sortedPills = buildSortedPillsList(data.reactions, activeVote, bakedVote);
+            var sortedPills = buildSortedPillsList(data.reactions, activeVote, bakedVote, settings.emojiPack);
             var hintSuffix = data.reactions.hintText ? (' (' + data.reactions.hintText + ')') : '';
             var totalVotes = 0;
             var i;
@@ -3977,7 +4149,7 @@
                     var iconWrap = document.createElement('span');
                     iconWrap.className = 'mdb-pill-icon';
 
-                    if (settings.usePngEmojis && item.png) {
+                    if (item.png) {
                         var imgEl = document.createElement('img');
                         imgEl.className = 'mdb-pill-emoji-img';
                         imgEl.src = item.png;
@@ -4202,6 +4374,7 @@
         var wrapper = rootEl.querySelector('.mdb-reactions-wrapper');
         var desiredClass = 'mdb-reactions-wrapper mdb-style-' + settings.pillStyle +
             ' mdb-ratings-style-' + settings.ratingsStyle +
+            ' mdb-ratings-format-' + settings.ratingsFormat +
             ' mdb-badges-' + settings.badgeStyle +
             (settings.emojiGlow ? ' mdb-emoji-glow' : '') +
             (settings.emojiAnim ? ' mdb-emoji-anim' : '');
@@ -4383,6 +4556,23 @@
         Lampa.SettingsApi.addParam({
             component: PLUGIN_COMPONENT,
             param: {
+                name: 'mdb_emoji_pack',
+                type: 'select',
+                values: getEmojiPackOptions(),
+                default: 'apple'
+            },
+            field: {
+                name: loc('Пак іконок емодзі', 'Пак иконок эмодзи'),
+                description: loc(
+                    'Візуальний стиль графіки для 5 емодзі-реакцій',
+                    'Визуальный стиль графики для 5 эмодзи-реакций'
+                )
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
                 name: 'mdb_pill_style',
                 type: 'select',
                 values: getPillStyleOptions(),
@@ -4393,6 +4583,23 @@
                 description: loc(
                     'Зовнішній вигляд кнопок емодзі-реакцій на сторінці фільму',
                     'Внешний вид кнопок эмодзи-реакций на странице фильма'
+                )
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: PLUGIN_COMPONENT,
+            param: {
+                name: 'mdb_ratings_format',
+                type: 'select',
+                values: getRatingsFormatOptions(),
+                default: 'full'
+            },
+            field: {
+                name: loc('Формат відображення рейтингів', 'Формат отображения рейтингов'),
+                description: loc(
+                    'Щільність та формат чисел у блоці оцінок платформ',
+                    'Плотность и формат чисел в блоке оценок платформ'
                 )
             }
         });
@@ -4494,7 +4701,6 @@
             { key: 'mdb_show_awards', title: loc('Показувати нагороди та номінації (MDBList)', 'Показывать награды и номинации (MDBList)') },
             { key: 'trakt_sync_watchlist', title: loc('Синхронізувати закладки з Trakt Watchlist', 'Синхронизировать закладки с Trakt Watchlist') },
             { key: 'mdb_show_bookmarks_row', title: loc('Показувати закладки на головній', 'Показывать закладки на главной'), bookmarksRefresh: true },
-            { key: 'mdb_use_png_emojis', title: loc('Глянцеві 3D-іконки емодзі', 'Глянцевые 3D-иконки эмодзи') },
             { key: 'mdb_emoji_glow', title: loc('Кольорове світіння емодзі', 'Цветное свечение эмодзи') },
             { key: 'mdb_emoji_anim', title: loc('Анімація емодзі при наведенні', 'Анимация эмодзи при наведении') },
             { key: 'mdb_emoji_bar', title: loc('Смужка відсотків у капсулах', 'Полоса процентов в капсулах') },
@@ -4598,11 +4804,11 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.8.1',
+                version: '1.9.0',
                 name: 'Trakt & Рейтинги',
                 description: loc(
-                    'Синхронізація Trakt, нагороди, 11 стилів, гнучке масштабування, скробблінг 80%, сезони серіалів, закладки на головній, імпорт історії та рейтинги з 7 платформ',
-                    'Синхронизация Trakt, награды, 11 стилей, гибкое масштабирование, скробблинг 80%, сезоны сериалов, закладки на главной, импорт истории и рейтинги с 7 платформ'
+                    'Синхронізація Trakt, нагороди, 5 емодзі-паків, 5 форматів рейтингів, 11 стилів, живе оновлення закладок, скробблінг 80%, сезони серіалів та рейтинги з 7 платформ',
+                    'Синхронизация Trakt, награды, 5 эмодзи-паков, 5 форматов рейтингов, 11 стилей, живое обновление закладок, скробблинг 80%, сезоны сериалов и рейтинги с 7 платформ'
                 ),
                 component: PLUGIN_COMPONENT
             });

@@ -2120,6 +2120,8 @@
                             results: rowItems,
                             title: rowTitle,
                             total_pages: rowItems.length > 0 ? 2 : 1,
+                            more: function() {
+                                openNativeBookmarksView();
                             onMore: function() {
                                 openNativeBookmarksView();
                             }

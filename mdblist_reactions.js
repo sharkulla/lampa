@@ -25,7 +25,6 @@
     var watchlistSyncLock = false;
     var historyImportInProgress = false;
     var authButtonFieldRef = null;
-    var bookmarksRefreshTimer = null;
 
     var lastRenderedCard = {
         rootEl: null,
@@ -2076,201 +2075,31 @@
         return null;
     }
 
-    function getDomCardId(cardEl) {
-        var cardId = 0;
+    function applyBookmarksShelfVisibility() {
         try {
-            if (window.$) {
-                var jqData = window.$(cardEl).data('card');
-                if (jqData && jqData.id) {
-                    cardId = parseInt(jqData.id, 10) || 0;
-                }
-            }
-        } catch (eJq) {
-            /* ignore */
-        }
-        if (!cardId && cardEl.card_data && cardEl.card_data.id) {
-            cardId = parseInt(cardEl.card_data.id, 10) || 0;
-        }
-        if (!cardId && cardEl.getAttribute) {
-            var attrId = parseInt(cardEl.getAttribute('data-mdb-bm-id'), 10);
-            if (!isNaN(attrId) && attrId > 0) cardId = attrId;
-        }
-        return cardId;
-    }
-
-    function buildLampaCardElement(card) {
-        try {
-            var cardObj = null;
-            if (window.Lampa && Lampa.Maker && typeof Lampa.Maker.make === 'function') {
-                cardObj = Lampa.Maker.make('Card', card, {});
-            } else if (window.Lampa && typeof Lampa.Card === 'function') {
-                cardObj = new Lampa.Card(card, {});
-            }
-            if (cardObj && typeof cardObj.create === 'function') {
-                cardObj.create();
-                cardObj.onEnter = function() {
-                    if (window.Lampa && Lampa.Activity && typeof Lampa.Activity.push === 'function') {
-                        Lampa.Activity.push({
-                            url: '',
-                            component: 'full',
-                            id: card.id,
-                            method: card.first_air_date ? 'tv' : 'movie',
-                            card: card,
-                            source: card.source || 'tmdb'
-                        });
-                    }
-                };
-                var rendered = typeof cardObj.render === 'function' ? cardObj.render() : null;
-                var domNode = rendered ? (rendered.jquery ? rendered[0] : rendered) : null;
-                if (domNode) {
-                    if (domNode.setAttribute) {
-                        domNode.setAttribute('data-mdb-bm-id', String(card.id));
-                    }
-                    return domNode;
-                }
-            }
-        } catch (err) {
-            /* ignore native card creation errors */
-        }
-        return null;
-    }
-
-    function ensureBookmarksLineCreatedOnMain() {
-        var existing = findBookmarksItemsLine();
-        if (existing) return existing;
-
-        try {
-            if (!window.Lampa || !Lampa.Activity || typeof Lampa.Activity.active !== 'function') return null;
-            var active = Lampa.Activity.active();
-            if (!active || active.component !== 'main' || !active.activity || typeof active.activity.render !== 'function') {
-                return null;
-            }
-            var mainNode = active.activity.render();
-            var mainEl = mainNode ? (mainNode.jquery ? mainNode[0] : mainNode) : null;
-            if (!mainEl) return null;
-
-            var mainScrollBody = mainEl.querySelector('.scroll__body');
-            if (!mainScrollBody) return null;
-
-            var books = getLocalBookmarks();
-            if (!books.length || !getSettings().showBookmarksRow) return null;
-
-            if (typeof Lampa.InteractionLine === 'function') {
-                var rowTitle = loc('Закладки', 'Закладки');
-                var lineComp = new Lampa.InteractionLine({
-                    results: books.slice(0, 20),
-                    title: rowTitle,
-                    total_pages: 2,
-                    onMore: openNativeBookmarksView
-                });
-                if (typeof lineComp.create === 'function') {
-                    lineComp.create();
-                    var lineRendered = typeof lineComp.render === 'function' ? lineComp.render() : null;
-                    var lineDom = lineRendered ? (lineRendered.jquery ? lineRendered[0] : lineRendered) : null;
-                    if (lineDom) {
-                        var refLines = mainScrollBody.querySelectorAll('.items-line');
-                        if (refLines.length > 1 && refLines[1].parentNode === mainScrollBody) {
-                            mainScrollBody.insertBefore(lineDom, refLines[1]);
-                        } else {
-                            mainScrollBody.appendChild(lineDom);
-                        }
-                        return lineDom;
-                    }
-                }
-            }
-        } catch (err) {
-            /* ignore InteractionLine creation errors */
-        }
-
-        return findBookmarksItemsLine();
-    }
-
-    function refreshBookmarksShelfLive() {
-        try {
+            var lineEl = findBookmarksItemsLine();
+            if (!lineEl) return;
             var settings = getSettings();
             var books = getLocalBookmarks();
-            var targetItems = books.slice(0, 20);
-            var lineEl = findBookmarksItemsLine();
-
-            if (!settings.showBookmarksRow || targetItems.length === 0) {
-                if (lineEl) {
-                    var clearCards = lineEl.querySelectorAll('.card:not(.card--more)');
-                    var k;
-                    for (k = 0; k < clearCards.length; k++) {
-                        if (clearCards[k].parentNode) {
-                            clearCards[k].parentNode.removeChild(clearCards[k]);
-                        }
-                    }
-                    lineEl.style.display = 'none';
-                }
-                return;
-            }
-
-            if (!lineEl) {
-                lineEl = ensureBookmarksLineCreatedOnMain();
-                if (!lineEl) return;
-            }
-
-            lineEl.style.display = '';
-            var scrollBody = lineEl.querySelector('.scroll__body');
-            if (!scrollBody) return;
-
-            var existingCards = scrollBody.querySelectorAll('.card:not(.card--more)');
-            var needsRebuild = (existingCards.length !== targetItems.length);
-            var i;
-
-            if (!needsRebuild) {
-                for (i = 0; i < existingCards.length; i++) {
-                    if (getDomCardId(existingCards[i]) !== Number(targetItems[i].id)) {
-                        needsRebuild = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!needsRebuild) return;
-
-            var moreCard = scrollBody.querySelector('.card--more');
-            for (i = 0; i < existingCards.length; i++) {
-                if (existingCards[i].parentNode) {
-                    existingCards[i].parentNode.removeChild(existingCards[i]);
-                }
-            }
-
-            for (i = 0; i < targetItems.length; i++) {
-                var domCard = buildLampaCardElement(targetItems[i]);
-                if (domCard) {
-                    if (moreCard && moreCard.parentNode === scrollBody) {
-                        scrollBody.insertBefore(domCard, moreCard);
-                    } else {
-                        scrollBody.appendChild(domCard);
-                    }
-                }
-            }
+            lineEl.style.display = (settings.showBookmarksRow && books.length > 0) ? '' : 'none';
         } catch (err) {
-            /* ignore live shelf refresh errors */
+            /* ignore */
         }
-    }
-
-    function scheduleBookmarksLiveRefresh() {
-        if (bookmarksRefreshTimer) {
-            window.clearTimeout(bookmarksRefreshTimer);
-        }
-        bookmarksRefreshTimer = window.setTimeout(function() {
-            bookmarksRefreshTimer = null;
-            refreshBookmarksShelfLive();
-        }, 40);
     }
 
     function openNativeBookmarksView() {
         if (!window.Lampa || !Lampa.Activity || typeof Lampa.Activity.push !== 'function') return;
-        Lampa.Activity.push({
+        var pushObj = {
             url: '',
             title: loc('Закладки', 'Закладки'),
             component: 'favorite',
             type: 'book',
             page: 1
-        });
+        };
+        if (window.Lampa.Api && Lampa.Api.sources && Lampa.Api.sources.favorite) {
+            pushObj.source = 'favorite';
+        }
+        Lampa.Activity.push(pushObj);
     }
 
     function registerBookmarksRow() {
@@ -2318,7 +2147,7 @@
             /* ignore */
         }
         registerBookmarksRow();
-        refreshBookmarksShelfLive();
+        applyBookmarksShelfVisibility();
     }
 
     function pushBookmarkToTraktWatchlist(card, isAdd) {
@@ -2451,7 +2280,7 @@
                                 }
                             }
                         }
-                        scheduleBookmarksLiveRefresh();
+                        applyBookmarksShelfVisibility();
                         logDebug('Синхронізовано закладок із Trakt Watchlist:', cards.length);
                         if (showSuccessToast && window.Lampa && Lampa.Noty) {
                             Lampa.Noty.show(loc('Watchlist Trakt синхронізовано', 'Watchlist Trakt синхронизирован'));
@@ -2467,13 +2296,9 @@
 
         var onBookAdded = function(e) {
             if (!e) return;
-            if (e.where && e.where !== 'book' && e.type && e.type !== 'book') return;
-            if (!e.where && !e.type) return;
-            if ((e.where && e.where !== 'book') && (e.type && e.type !== 'book')) return;
             if (e.where !== 'book' && e.type !== 'book') return;
-
             var card = e.card || e.data || null;
-            scheduleBookmarksLiveRefresh();
+            applyBookmarksShelfVisibility();
             if (card && !watchlistSyncLock) {
                 pushBookmarkToTraktWatchlist(card, true);
             }
@@ -2482,9 +2307,8 @@
         var onBookRemoved = function(e) {
             if (!e) return;
             if (e.where !== 'book' && e.type !== 'book') return;
-
             var card = e.card || e.data || null;
-            scheduleBookmarksLiveRefresh();
+            applyBookmarksShelfVisibility();
             if (card && !watchlistSyncLock) {
                 pushBookmarkToTraktWatchlist(card, false);
             }
@@ -2495,26 +2319,6 @@
             Lampa.Favorite.listener.follow('added', onBookAdded);
             Lampa.Favorite.listener.follow('remove', onBookRemoved);
             Lampa.Favorite.listener.follow('removed', onBookRemoved);
-        }
-
-        if (Lampa.Listener && typeof Lampa.Listener.follow === 'function') {
-            Lampa.Listener.follow('activity', function(e) {
-                if (!e || !e.type) return;
-                if (e.type === 'start' || e.type === 'backward' || e.type === 'destroy' || e.type === 'active') {
-                    window.setTimeout(function() {
-                        try {
-                            if (Lampa.Activity && typeof Lampa.Activity.active === 'function') {
-                                var active = Lampa.Activity.active();
-                                if (active && active.component === 'main') {
-                                    refreshBookmarksShelfLive();
-                                }
-                            }
-                        } catch (errAct) {
-                            /* ignore */
-                        }
-                    }, 60);
-                }
-            });
         }
 
         window.setTimeout(function() {
@@ -4804,11 +4608,11 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.9.0',
+                version: '1.9.1',
                 name: 'Trakt & Рейтинги',
                 description: loc(
-                    'Синхронізація Trakt, нагороди, 5 емодзі-паків, 5 форматів рейтингів, 11 стилів, живе оновлення закладок, скробблінг 80%, сезони серіалів та рейтинги з 7 платформ',
-                    'Синхронизация Trakt, награды, 5 эмодзи-паков, 5 форматов рейтингов, 11 стилей, живое обновление закладок, скробблинг 80%, сезоны сериалов и рейтинги с 7 платформ'
+                    'Синхронізація Trakt, нагороди, 5 емодзі-паків, 5 форматів рейтингів, 11 стилів, закладки на головній, скробблінг 80%, сезони серіалів та рейтинги з 7 платформ',
+                    'Синхронизация Trakt, награды, 5 эмодзи-паков, 5 форматов рейтингов, 11 стилей, закладки на главной, скробблинг 80%, сезоны сериалов и рейтинги с 7 платформ'
                 ),
                 component: PLUGIN_COMPONENT
             });
@@ -4918,7 +4722,7 @@
                         state.apiError = 'NO_KEY';
                     } else if (errSummary || !json || !hasValidPositiveRatings(json.ratings)) {
                         state.apiError = errSummary || loc('Порожній масив ratings', 'Пустой массив ratings');
-                        logDebug('MDBList API помилка:', state.apiError);
+                        logDebug('MDBList API помилка:', state.apiError
                     } else {
                         state.apiError = '';
                         state.ratings = json.ratings;

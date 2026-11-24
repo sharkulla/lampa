@@ -2349,6 +2349,19 @@
                 pushBookmarkToTraktWatchlist(card, false);
             }
         };
+        if (Lampa.Favorite && Lampa.Favorite.listener && typeof Lampa.Favorite.listener.follow === 'function') {
+            Lampa.Favorite.listener.follow('add', onBookAdded);
+            Lampa.Favorite.listener.follow('added', onBookAdded);
+            Lampa.Favorite.listener.follow('remove', onBookRemoved);
+            Lampa.Favorite.listener.follow('removed', onBookRemoved);
+        }
+
+        window.setTimeout(function() {
+            if (isTraktLoggedIn() && getSettings().syncWatchlist) {
+                runTwoWayWatchlistSync(false);
+            }
+        }, 3000);
+    }
 
     function buildScrobblePayload(session, progressVal) {
         var idsObj = {

@@ -20,11 +20,13 @@
     var STYLE_ID = 'mdblist-reactions-plugin-styles';
     var PLUGIN_COMPONENT = 'mdblist_reactions';
     var BOOKMARKS_ROW_NAME = 'mdb_bookmarks_row';
+    var BOOKMARKS_FULL_COMPONENT = 'mdb_bookmarks_full';
     var initialized = false;
     var activePollTimer = null;
     var watchlistSyncLock = false;
     var historyImportInProgress = false;
     var authButtonFieldRef = null;
+    var lastBookmarksShelfSignature = '';
     var lastWatchlistPush = {
         key: '',
         ts: 0
@@ -2066,6 +2068,18 @@
         }
     }
 
+    function getBookmarksSignature(list) {
+        if (!list || !list.length) return '';
+        var ids = new Array();
+        var i;
+        for (i = 0; i < list.length; i++) {
+            if (list[i] && list[i].id) {
+                ids.push(String(list[i].id));
+            }
+        }
+        return ids.join(',');
+    }
+
     function findAllBookmarksItemsLines() {
         var found = new Array();
         var titleTarget = loc('Закладки', 'Закладки');
@@ -2085,79 +2099,48 @@
         return found;
     }
 
-    function findBookmarksItemsLine() {
-        var titleTarget = loc('Закладки', 'Закладки');
-        var activeRoot = document.querySelector('.activity--active');
-        var lines;
-        var i;
-        var titleEl;
-
-        if (activeRoot) {
-            lines = activeRoot.querySelectorAll('.items-line');
-            for (i = 0; i < lines.length; i++) {
-                titleEl = lines[i].querySelector('.items-line__title');
-                if (lines[i].getAttribute('data-mdb-bookmarks-row') === '1' || (titleEl && trimStr(titleEl.textContent) === titleTarget)) {
-                    lines[i].setAttribute('data-mdb-bookmarks-row', '1');
-                    return lines[i];
-                }
-            }
-        }
-
-        var all = findAllBookmarksItemsLines();
-        return all.length > 0 ? all[0] : null;
-    }
-
     function openNativeBookmarksView() {
         if (!window.Lampa || !Lampa.Activity || typeof Lampa.Activity.push !== 'function') return;
         Lampa.Activity.push({
             url: '',
-            title: loc('Вибране', 'Избранное'),
-            component: 'favorite',
-            type: 'book',
+            title: loc('Закладки', 'Закладки'),
+            component: BOOKMARKS_FULL_COMPONENT,
             page: 1
         });
     }
 
-    function bindBookmarksMoreButton(lineEl) {
+    function bindBookmarksMoreElements(lineEl) {
         if (!lineEl) return;
-        var headEl = lineEl.querySelector('.items-line__head');
-        var moreBtn = lineEl.querySelector('.items-line__more');
-        var books = getLocalBookmarks();
+        var targets = lineEl.querySelectorAll('.items-line__more, .card-more');
+        var i;
 
-        if (!moreBtn && headEl && books.length > 0) {
-            moreBtn = document.createElement('div');
-            moreBtn.className = 'items-line__more selector';
-            moreBtn.textContent = loc('Ще', 'Ещё');
-            headEl.appendChild(moreBtn);
+        for (i = 0; i < targets.length; i++) {
+            (function(btn) {
+                if (!btn || btn.getAttribute('data-mdb-more-bound') === '1') return;
+                btn.setAttribute('data-mdb-more-bound', '1');
+
+                var handleMoreAction = function(ev) {
+                    if (ev) {
+                        if (typeof ev.preventDefault === 'function') ev.preventDefault();
+                        if (typeof ev.stopPropagation === 'function') ev.stopPropagation();
+                        if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+                    }
+                    openNativeBookmarksView();
+                    return false;
+                };
+
+                if (window.$) {
+                    try {
+                        window.$(btn).off('hover:enter click').on('hover:enter click', handleMoreAction);
+                    } catch (eJq) {
+                        /* ignore jQuery errors */
+                    }
+                }
+
+                btn.addEventListener('click', handleMoreAction, true);
+                btn.addEventListener('hover:enter', handleMoreAction, true);
+            })(targets[i]);
         }
-
-        if (!moreBtn) return;
-
-        if (moreBtn.getAttribute('data-mdb-more-bound') === '1') {
-            return;
-        }
-        moreBtn.setAttribute('data-mdb-more-bound', '1');
-
-        var handleMoreAction = function(ev) {
-            if (ev) {
-                if (typeof ev.preventDefault === 'function') ev.preventDefault();
-                if (typeof ev.stopPropagation === 'function') ev.stopPropagation();
-                if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
-            }
-            openNativeBookmarksView();
-            return false;
-        };
-
-        if (window.$) {
-            try {
-                window.$(moreBtn).off('hover:enter click').on('hover:enter click', handleMoreAction);
-            } catch (eJq) {
-                /* ignore jQuery errors */
-            }
-        }
-
-        moreBtn.addEventListener('click', handleMoreAction, true);
-        moreBtn.addEventListener('hover:enter', handleMoreAction, true);
     }
 
     function getBookmarkCardDisplayTitle(card) {
@@ -2290,16 +2273,6 @@
                 cardObj.onEnter = function() {
                     openBookmarkMovieCard(cardData);
                 };
-                cardObj.onFocus = function(target) {
-                    var targetEl = (target && target.jquery) ? target[0] : target;
-                    if (targetEl && typeof targetEl.scrollIntoView === 'function') {
-                        try {
-                            targetEl.scrollIntoView({ block: 'nearest', inline: 'center' });
-                        } catch (eScroll) {
-                            /* ignore */
-                        }
-                    }
-                };
                 cardObj.create();
                 var rendered = cardObj.render();
                 var domEl = (rendered && rendered.jquery) ? rendered[0] : rendered;
@@ -2397,7 +2370,7 @@
         lineEl.appendChild(headEl);
         lineEl.appendChild(bodyEl);
 
-        bindBookmarksMoreButton(lineEl);
+        bindBookmarksMoreElements(lineEl);
         return lineEl;
     }
 
@@ -2436,22 +2409,12 @@
         if (!lineEl) return;
 
         if (!showRow || !desiredBooks || desiredBooks.length === 0) {
-            var containerToClear = getBookmarksCardsContainer(lineEl);
-            if (containerToClear) {
-                var cardsToClear = containerToClear.querySelectorAll('.card');
-                var c;
-                for (c = 0; c < cardsToClear.length; c++) {
-                    if (cardsToClear[c].parentNode) {
-                        cardsToClear[c].parentNode.removeChild(cardsToClear[c]);
-                    }
-                }
-            }
             lineEl.style.display = 'none';
             return;
         }
 
         lineEl.style.display = '';
-        bindBookmarksMoreButton(lineEl);
+        bindBookmarksMoreElements(lineEl);
 
         var cardsContainer = getBookmarksCardsContainer(lineEl);
         if (!cardsContainer) return;
@@ -2462,13 +2425,13 @@
             desiredMap[String(desiredBooks[i].id)] = desiredBooks[i];
         }
 
-        var existingCards = cardsContainer.querySelectorAll('.card');
+        var existingCards = cardsContainer.querySelectorAll('.card:not(.card-more)');
         var presentMap = {};
         for (i = 0; i < existingCards.length; i++) {
             var cardNode = existingCards[i];
             var resolvedId = resolveCardIdFromDom(cardNode, desiredBooks);
             var idKey = resolvedId ? String(resolvedId) : '';
-            if (!idKey || !desiredMap[idKey] || presentMap[idKey]) {
+            if (!idKey || !desiredMap[idKey]) {
                 if (cardNode.parentNode) {
                     cardNode.parentNode.removeChild(cardNode);
                 }
@@ -2476,6 +2439,8 @@
                 presentMap[idKey] = cardNode;
             }
         }
+
+        var moreCard = cardsContainer.querySelector('.card-more');
 
         for (i = desiredBooks.length - 1; i >= 0; i--) {
             var bookItem = desiredBooks[i];
@@ -2486,6 +2451,8 @@
                     var nextSibling = (i + 1 < desiredBooks.length) ? presentMap[String(desiredBooks[i + 1].id)] : null;
                     if (nextSibling && nextSibling.parentNode === cardsContainer) {
                         cardsContainer.insertBefore(newCardEl, nextSibling);
+                    } else if (moreCard && moreCard.parentNode === cardsContainer) {
+                        cardsContainer.insertBefore(newCardEl, moreCard);
                     } else if (cardsContainer.firstChild) {
                         cardsContainer.insertBefore(newCardEl, cardsContainer.firstChild);
                     } else {
@@ -2495,22 +2462,26 @@
                 }
             }
         }
-
-        for (i = 0; i < desiredBooks.length; i++) {
-            var orderedNode = presentMap[String(desiredBooks[i].id)];
-            if (orderedNode && orderedNode.parentNode === cardsContainer) {
-                cardsContainer.appendChild(orderedNode);
-            }
-        }
     }
 
-    function syncBookmarksShelfDom() {
+    function syncBookmarksShelfDom(forceSync) {
         try {
             var settings = getSettings();
             var books = getLocalBookmarks();
             var desired = books.length > 0 ? books.slice(0, 20) : new Array();
+            var currentSig = getBookmarksSignature(desired);
             var lines = findAllBookmarksItemsLines();
             var i;
+
+            for (i = 0; i < lines.length; i++) {
+                lines[i].style.display = (settings.showBookmarksRow && desired.length > 0) ? '' : 'none';
+                bindBookmarksMoreElements(lines[i]);
+            }
+
+            if (!forceSync && currentSig === lastBookmarksShelfSignature && lines.length > 0) {
+                return;
+            }
+            lastBookmarksShelfSignature = currentSig;
 
             if (lines.length === 0 && settings.showBookmarksRow && desired.length > 0) {
                 var createdLine = ensureBookmarksLineMountedIfMissing(desired);
@@ -2528,7 +2499,182 @@
     }
 
     function applyBookmarksShelfVisibility() {
-        syncBookmarksShelfDom();
+        syncBookmarksShelfDom(false);
+    }
+
+    function registerBookmarksFullComponent() {
+        if (!window.Lampa || !Lampa.Component || typeof Lampa.Component.add !== 'function') return;
+
+        Lampa.Component.add(BOOKMARKS_FULL_COMPONENT, function() {
+            var scroll = null;
+            var html = document.createElement('div');
+            html.className = 'category-full';
+            var cardInstances = new Array();
+            var cardElements = new Array();
+            var lastFocusedEl = null;
+            var renderedSignature = '__init__';
+
+            var destroyCards = function() {
+                var i;
+                for (i = 0; i < cardInstances.length; i++) {
+                    try {
+                        if (cardInstances[i] && typeof cardInstances[i].destroy === 'function') {
+                            cardInstances[i].destroy();
+                        }
+                    } catch (eDest) {
+                        /* ignore */
+                    }
+                }
+                cardInstances = new Array();
+                cardElements = new Array();
+                lastFocusedEl = null;
+                while (html.firstChild) {
+                    html.removeChild(html.firstChild);
+                }
+            };
+
+            var renderGrid = function() {
+                var books = getLocalBookmarks();
+                var sig = getBookmarksSignature(books);
+                if (sig === renderedSignature) {
+                    return;
+                }
+                renderedSignature = sig;
+                destroyCards();
+
+                if (!books.length) {
+                    var emptyEl = document.createElement('div');
+                    emptyEl.className = 'empty';
+                    emptyEl.innerHTML = '<div class="empty__title">' + loc('Тут порожньо', 'Здесь пусто') + '</div>' +
+                        '<div class="empty__descr">' + loc('Додайте фільми або серіали до закладок', 'Добавьте фильмы или сериалы в закладки') + '</div>';
+                    html.appendChild(emptyEl);
+                    return;
+                }
+
+                var i;
+                for (i = 0; i < books.length; i++) {
+                    (function(cardData) {
+                        var cardObj = null;
+                        try {
+                            if (window.Lampa && Lampa.Maker && typeof Lampa.Maker.make === 'function') {
+                                cardObj = Lampa.Maker.make('Card', cardData, { card_category: true });
+                            } else if (window.Lampa && typeof Lampa.Card === 'function') {
+                                cardObj = new Lampa.Card(cardData, { card_category: true });
+                            }
+                        } catch (eMake) {
+                            cardObj = null;
+                        }
+
+                        if (cardObj && typeof cardObj.create === 'function' && typeof cardObj.render === 'function') {
+                            try {
+                                cardObj.onEnter = function() {
+                                    openBookmarkMovieCard(cardData);
+                                };
+                                cardObj.onFocus = function(target) {
+                                    var targetEl = (target && target.jquery) ? target[0] : target;
+                                    lastFocusedEl = targetEl || null;
+                                    if (scroll && typeof scroll.update === 'function' && lastFocusedEl) {
+                                        try {
+                                            scroll.update(window.$ ? window.$(lastFocusedEl) : lastFocusedEl, true);
+                                        } catch (eScr) {
+                                            /* ignore */
+                                        }
+                                    }
+                                };
+                                cardObj.create();
+                                var rendered = cardObj.render();
+                                var domEl = (rendered && rendered.jquery) ? rendered[0] : rendered;
+                                if (domEl && domEl.nodeType === 1) {
+                                    if (typeof cardObj.visible === 'function') {
+                                        cardObj.visible();
+                                    }
+                                    html.appendChild(domEl);
+                                    cardInstances.push(cardObj);
+                                    cardElements.push(domEl);
+                                    return;
+                                }
+                            } catch (eCard) {
+                                /* fallback below */
+                            }
+                        }
+
+                        var fallback = createNativeBookmarksCard(cardData);
+                        if (fallback) {
+                            html.appendChild(fallback);
+                            cardElements.push(fallback);
+                        }
+                    })(books[i]);
+                }
+            };
+
+            var compObj = {
+                create: function() {
+                    if (window.Lampa && typeof Lampa.Scroll === 'function') {
+                        scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+                    }
+                    renderGrid();
+                    if (scroll && typeof scroll.append === 'function') {
+                        scroll.append(window.$ ? window.$(html) : html);
+                    }
+                    if (compObj.activity && typeof compObj.activity.loader === 'function') {
+                        compObj.activity.loader(false);
+                    }
+                },
+                start: function() {
+                    renderGrid();
+                    if (compObj.activity && typeof compObj.activity.loader === 'function') {
+                        compObj.activity.loader(false);
+                    }
+                    if (window.Lampa && Lampa.Controller) {
+                        var scrollRender = (scroll && typeof scroll.render === 'function')
+                            ? scroll.render()
+                            : (window.$ ? window.$(html) : html);
+
+                        Lampa.Controller.add('content', {
+                            toggle: function() {
+                                Lampa.Controller.collectionSet(scrollRender);
+                                Lampa.Controller.collectionFocus(lastFocusedEl || (cardElements[0] || false), scrollRender);
+                            },
+                            left: function() {
+                                if (window.Navigator && Navigator.canmove('left')) Navigator.move('left');
+                                else Lampa.Controller.toggle('menu');
+                            },
+                            right: function() {
+                                if (window.Navigator && Navigator.canmove('right')) Navigator.move('right');
+                            },
+                            up: function() {
+                                if (window.Navigator && Navigator.canmove('up')) Navigator.move('up');
+                                else Lampa.Controller.toggle('head');
+                            },
+                            down: function() {
+                                if (window.Navigator && Navigator.canmove('down')) Navigator.move('down');
+                            },
+                            back: function() {
+                                Lampa.Activity.backward();
+                            }
+                        });
+                        Lampa.Controller.toggle('content');
+                    }
+                },
+                pause: function() {},
+                stop: function() {},
+                render: function() {
+                    if (scroll && typeof scroll.render === 'function') {
+                        return scroll.render();
+                    }
+                    return window.$ ? window.$(html) : html;
+                },
+                destroy: function() {
+                    destroyCards();
+                    if (scroll && typeof scroll.destroy === 'function') {
+                        scroll.destroy();
+                    }
+                    scroll = null;
+                }
+            };
+
+            return compObj;
+        });
     }
 
     function registerBookmarksRow() {
@@ -2545,11 +2691,14 @@
                 call: function() {
                     return function(call) {
                         if (!getSettings().showBookmarksRow) {
+                            lastBookmarksShelfSignature = '';
                             call({ results: new Array(), title: rowTitle });
                             return;
                         }
                         var books = getLocalBookmarks();
                         var rowItems = books.length > 0 ? books.slice(0, 20) : new Array();
+                        lastBookmarksShelfSignature = getBookmarksSignature(rowItems);
+
                         call({
                             results: rowItems,
                             title: rowTitle,
@@ -2560,11 +2709,12 @@
                         });
 
                         window.setTimeout(function() {
-                            syncBookmarksShelfDom();
-                        }, 80);
-                        window.setTimeout(function() {
-                            syncBookmarksShelfDom();
-                        }, 380);
+                            var lines = findAllBookmarksItemsLines();
+                            var i;
+                            for (i = 0; i < lines.length; i++) {
+                                bindBookmarksMoreElements(lines[i]);
+                            }
+                        }, 180);
                     };
                 }
             });
@@ -2583,11 +2733,13 @@
             /* ignore */
         }
         registerBookmarksRow();
-        syncBookmarksShelfDom();
+        syncBookmarksShelfDom(true);
     }
 
     function attachBookmarksActivitySafeguard() {
         if (!window.Lampa || !Lampa.Listener || typeof Lampa.Listener.follow !== 'function') return;
+
+        var replacePending = false;
 
         Lampa.Listener.follow('activity', function(e) {
             if (!e) return;
@@ -2595,28 +2747,31 @@
             var obj = e.object || (window.Lampa && Lampa.Activity && typeof Lampa.Activity.active === 'function' ? Lampa.Activity.active() : null);
             var comp = e.component || (obj && obj.component) || '';
 
-            if (comp === 'category_full' && obj && (obj.url === BOOKMARKS_ROW_NAME || (obj.title === loc('Закладки', 'Закладки') && !obj.url))) {
-                if (window.Lampa && Lampa.Activity && typeof Lampa.Activity.replace === 'function') {
-                    Lampa.Activity.replace({
-                        url: '',
-                        title: loc('Вибране', 'Избранное'),
-                        component: 'favorite',
-                        type: 'book',
-                        page: 1
-                    });
-                    return;
+            if (e.type === 'start' && comp === 'category_full' && obj && (obj.url === BOOKMARKS_ROW_NAME || (obj.title === loc('Закладки', 'Закладки') && !obj.url))) {
+                if (!replacePending && window.Lampa && Lampa.Activity && typeof Lampa.Activity.replace === 'function') {
+                    replacePending = true;
+                    window.setTimeout(function() {
+                        replacePending = false;
+                        try {
+                            Lampa.Activity.replace({
+                                url: '',
+                                title: loc('Закладки', 'Закладки'),
+                                component: BOOKMARKS_FULL_COMPONENT,
+                                page: 1
+                            });
+                        } catch (eRep) {
+                            /* ignore */
+                        }
+                    }, 0);
                 }
+                return;
             }
 
-            if (comp === 'main' && (e.type === 'start' || e.type === 'active' || e.type === 'complite' || e.type === 'backward')) {
-                window.setTimeout(syncBookmarksShelfDom, 60);
-                window.setTimeout(syncBookmarksShelfDom, 350);
+            if (comp === 'main' && (e.type === 'start' || e.type === 'backward' || e.type === 'active')) {
+                window.setTimeout(function() {
+                    syncBookmarksShelfDom(false);
+                }, 80);
             }
-        });
-
-        Lampa.Listener.follow('main', function() {
-            window.setTimeout(syncBookmarksShelfDom, 80);
-            window.setTimeout(syncBookmarksShelfDom, 380);
         });
     }
 
@@ -2746,11 +2901,13 @@
 
                     resolveTmdbCardsBatch(missingInLampa, function(cards) {
                         var k;
+                        var addedAny = false;
                         for (k = 0; k < cards.length; k++) {
                             if (!isCardInLampaBookmarks(cards[k].id)) {
                                 watchlistSyncLock = true;
                                 try {
                                     Lampa.Favorite.add('book', cards[k]);
+                                    addedAny = true;
                                 } catch (errAdd) {
                                     /* ignore */
                                 } finally {
@@ -2758,7 +2915,9 @@
                                 }
                             }
                         }
-                        syncBookmarksShelfDom();
+                        if (addedAny) {
+                            syncBookmarksShelfDom(true);
+                        }
                         logDebug('Синхронізовано закладок із Trakt Watchlist:', cards.length);
                         if (showSuccessToast && window.Lampa && Lampa.Noty) {
                             Lampa.Noty.show(loc('Watchlist Trakt синхронізовано', 'Watchlist Trakt синхронизирован'));
@@ -2783,9 +2942,11 @@
         var onBookAdded = function(e) {
             if (!isBookFavoriteEvent(e)) return;
             var card = e.card || e.data || null;
-            syncBookmarksShelfDom();
-            if (card && !watchlistSyncLock) {
-                pushBookmarkToTraktWatchlist(card, true);
+            if (!watchlistSyncLock) {
+                syncBookmarksShelfDom(true);
+                if (card) {
+                    pushBookmarkToTraktWatchlist(card, true);
+                }
             }
         };
 
@@ -2797,7 +2958,7 @@
             for (lIdx = 0; lIdx < lines.length; lIdx++) {
                 var lineEl = lines[lIdx];
                 if (card && card.id) {
-                    var cards = lineEl.querySelectorAll('.card');
+                    var cards = lineEl.querySelectorAll('.card:not(.card-more)');
                     var idx;
                     for (idx = 0; idx < cards.length; idx++) {
                         if (doesDomCardMatchTarget(cards[idx], card) && cards[idx].parentNode) {
@@ -2806,7 +2967,7 @@
                     }
                 }
             }
-            syncBookmarksShelfDom();
+            syncBookmarksShelfDom(true);
             if (card && !watchlistSyncLock) {
                 pushBookmarkToTraktWatchlist(card, false);
             }
@@ -4011,7 +4172,7 @@
 
             '.mdb-ratings-style-glass .mdb-rating-item,' +
             '.mdb-ratings-style-solid .mdb-rating-item,' +
-            '.mdb-ratings-style-outline .mdb-rating-item,' +
+            '.mdb-ratings-style-outline .mdb-rating
             '.mdb-ratings-style-compact .mdb-rating-item,' +
             '.mdb-ratings-style-neon .mdb-rating-item,' +
             '.mdb-ratings-style-graphite .mdb-rating-item,' +
@@ -5106,7 +5267,7 @@
         if (typeof Lampa.Manifest.plugins.push === 'function') {
             Lampa.Manifest.plugins.push({
                 type: 'other',
-                version: '1.9.2',
+                version: '1.9.3',
                 name: 'Trakt & Рейтинги',
                 description: loc(
                     'Синхронізація Trakt, нагороди, 5 емодзі-паків, 5 форматів рейтингів, 11 стилів, закладки на головній, скробблінг 80%, сезони серіалів та рейтинги з 7 платформ',
@@ -5280,6 +5441,7 @@
         injectStyles();
         registerManifest();
         registerSettings();
+        registerBookmarksFullComponent();
         attachFullListener();
         attachPlayerScrobbler();
         attachWatchlistListeners();
